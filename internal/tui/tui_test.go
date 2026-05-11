@@ -2,6 +2,7 @@ package tui
 
 import (
 	"context"
+	"regexp"
 	"strings"
 	"testing"
 
@@ -281,6 +282,61 @@ func TestTUIPreviewRendersExpandedMetrics(t *testing.T) {
 	}
 }
 
+func TestTUIPreviewHidesFrontmatterByDefault(t *testing.T) {
+	m := newTUITestModel(t, "Intro body")
+	preview := visibleText(m.renderPreviewPane(80, 14))
+
+	for _, hidden := range []string{"---", "source_id:", "content_hash:", "tags:"} {
+		if strings.Contains(preview, hidden) {
+			t.Fatalf("preview should hide frontmatter field %q by default:\n%s", hidden, preview)
+		}
+	}
+	if !strings.Contains(preview, "Intro body") {
+		t.Fatalf("preview missing body:\n%s", preview)
+	}
+}
+
+func TestTUIFrontmatterToggleShowsFrontmatter(t *testing.T) {
+	m := newTUITestModel(t, "Intro body")
+	if m.showFrontmatter {
+		t.Fatal("frontmatter should be hidden by default")
+	}
+
+	m = updateKey(t, m, "m")
+	if !m.showFrontmatter {
+		t.Fatal("m did not show frontmatter")
+	}
+	preview := visibleText(m.renderPreviewPane(80, 18))
+	if !strings.Contains(preview, "source_id:") || !strings.Contains(preview, "content_hash:") {
+		t.Fatalf("frontmatter toggle did not reveal metadata:\n%s", preview)
+	}
+
+	m = updateKey(t, m, "m")
+	if m.showFrontmatter {
+		t.Fatal("second m did not hide frontmatter")
+	}
+	preview = visibleText(m.renderPreviewPane(80, 18))
+	if strings.Contains(preview, "source_id:") {
+		t.Fatalf("frontmatter stayed visible after second toggle:\n%s", preview)
+	}
+}
+
+func TestTUIPreviewRendersMarkdown(t *testing.T) {
+	m := newTUITestModel(t, "## Section\n\nA **bold** [link](https://example.com).\n\n- one")
+	preview := visibleText(m.renderPreviewPane(80, 18))
+
+	for _, raw := range []string{"## Section", "**bold**", "[link](https://example.com)"} {
+		if strings.Contains(preview, raw) {
+			t.Fatalf("preview still contains raw markdown %q:\n%s", raw, preview)
+		}
+	}
+	for _, want := range []string{"Section", "bold", "link", "one"} {
+		if !strings.Contains(preview, want) {
+			t.Fatalf("preview missing rendered markdown text %q:\n%s", want, preview)
+		}
+	}
+}
+
 func TestTUIWindowSizeAndFullHeightRender(t *testing.T) {
 	m := NewModel(nil)
 	m = updateWindowSize(t, m, 72, 16)
@@ -293,7 +349,7 @@ func TestTUIWindowSizeAndFullHeightRender(t *testing.T) {
 		t.Fatalf("rendered lines=%d want=16\n%s", got, view)
 	}
 	for i, line := range lines {
-		if got := lipgloss.Width(line); got != 72 {
+		if got := lipgloss.Width(visibleText(line)); got != 72 {
 			t.Fatalf("line %d width=%d want=72: %q", i, got, line)
 		}
 	}
@@ -358,6 +414,33 @@ func updateKey(t *testing.T, m Model, key string) Model {
 	}
 	model, _ := m.Update(msg)
 	return model.(Model)
+}
+
+func newTUITestModel(t *testing.T, body string) Model {
+	t.Helper()
+	testutil.IsolatedEnv(t)
+	feed := testutil.RSSFeed("Example", testutil.DefaultItem("guid-1", "Markdown title", body))
+	server := testutil.FeedServer(t, &feed)
+	t.Cleanup(server.Close)
+	if _, err := app.AddRSS(context.Background(), server.URL, app.AddRSSParams{ID: "example", Name: "Example"}); err != nil {
+		t.Fatal(err)
+	}
+	a, err := app.Open(context.Background())
+	if err != nil {
+		t.Fatal(err)
+	}
+	t.Cleanup(func() { _ = a.Close() })
+	res := a.Sync(context.Background(), "")
+	if !res.OK {
+		t.Fatalf("sync: %#v", res)
+	}
+	return NewModel(a)
+}
+
+var ansiEscapeRE = regexp.MustCompile("\x1b\\[[0-?]*[ -/]*[@-~]")
+
+func visibleText(value string) string {
+	return ansiEscapeRE.ReplaceAllString(value, "")
 }
 
 func updateWindowSize(t *testing.T, m Model, width, height int) Model {

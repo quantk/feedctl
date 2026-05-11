@@ -14,6 +14,7 @@ import (
 
 	tea "github.com/charmbracelet/bubbletea"
 	"github.com/charmbracelet/lipgloss"
+	xansi "github.com/charmbracelet/x/ansi"
 )
 
 const (
@@ -74,24 +75,25 @@ type syncMsg struct{ result any }
 type tickMsg struct{}
 
 type Model struct {
-	app          *app.App
-	items        []store.Item
-	sources      []store.Source
-	status       store.StatusSummary
-	section      int
-	cursor       int
-	reader       bool
-	help         bool
-	searchMode   bool
-	filterMode   bool
-	search       string
-	filter       string
-	message      string
-	showRemoved  bool
-	syncing      bool
-	width        int
-	height       int
-	lastPeriodic map[string]time.Time
+	app             *app.App
+	items           []store.Item
+	sources         []store.Source
+	status          store.StatusSummary
+	section         int
+	cursor          int
+	reader          bool
+	help            bool
+	searchMode      bool
+	filterMode      bool
+	showFrontmatter bool
+	search          string
+	filter          string
+	message         string
+	showRemoved     bool
+	syncing         bool
+	width           int
+	height          int
+	lastPeriodic    map[string]time.Time
 }
 
 func Run(ctx context.Context) error {
@@ -238,6 +240,15 @@ func (m Model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 			m.withSelected(func(item store.Item) { _ = m.app.OpenItem(context.Background(), item.ID) })
 		case "e":
 			m.withSelected(func(item store.Item) { _ = m.app.OpenMarkdown(context.Background(), item.ID) })
+		case "m":
+			if m.section != 3 {
+				m.showFrontmatter = !m.showFrontmatter
+				if m.showFrontmatter {
+					m.message = "frontmatter shown"
+				} else {
+					m.message = "frontmatter hidden"
+				}
+			}
 		case "tab":
 			m.section = (m.section + 1) % len(sections)
 			m.cursor = 0
@@ -595,7 +606,7 @@ func (m Model) renderPreviewPane(width, height int) string {
 		lines = append(lines, renderPlainLine(" "+metricsText, width, mutedStyle))
 	}
 	lines = append(lines, renderPlainLine("", width, panelStyle))
-	for _, line := range m.previewLines(height - len(lines)) {
+	for _, line := range m.previewLines(height-len(lines), width-2) {
 		lines = append(lines, renderPlainLine(" "+line, width, panelStyle))
 	}
 	return fitLines(lines, width, height, panelStyle)
@@ -616,8 +627,19 @@ func (m Model) renderStatus(width int) string {
 	if m.message != "" {
 		parts = append(parts, accentStyle.Render(m.message))
 	}
-	parts = append(parts, mutedStyle.Render("? help · q quit"))
+	parts = append(parts, mutedStyle.Render("? help · m frontmatter · q quit"))
 
+	for len(parts) > 0 {
+		line := renderStatusParts(parts)
+		if lipgloss.Width(line) <= width {
+			return fillStyled(line, width, appStyle)
+		}
+		parts = parts[:len(parts)-1]
+	}
+	return renderPlainLine(fmt.Sprintf(" ●%d unread · sync %s", m.status.UnreadCount, syncStatus), width, appStyle)
+}
+
+func renderStatusParts(parts []string) string {
 	line := appStyle.Render(" ")
 	separator := appStyle.Render(" │ ")
 	for i, part := range parts {
@@ -626,7 +648,7 @@ func (m Model) renderStatus(width int) string {
 		}
 		line += part
 	}
-	return fillStyled(line, width, appStyle)
+	return line
 }
 
 func (m Model) renderHelp(width, height int) string {
@@ -642,7 +664,7 @@ func (m Model) renderHelp(width, height int) string {
 		renderPlainLine("   / search, n/N next/prev, f live filter, F clear, A toggle removed-source items", width, bodyStyle),
 		renderPlainLine(" Items", width, accentStyle),
 		renderPlainLine("   Enter/l open, Space read/unread, u unread, s star, a archive", width, bodyStyle),
-		renderPlainLine("   o open URL, e edit Markdown", width, bodyStyle),
+		renderPlainLine("   o open URL, e edit Markdown, m toggle frontmatter", width, bodyStyle),
 		renderPlainLine(" Sync", width, accentStyle),
 		renderPlainLine("   r refresh, R sync all", width, bodyStyle),
 		renderPlainLine(" Other", width, accentStyle),
@@ -761,17 +783,13 @@ func truncateText(text string, width int) string {
 	if width <= 0 {
 		return ""
 	}
-	if lipgloss.Width(text) <= width {
+	if xansi.StringWidth(text) <= width {
 		return text
 	}
 	if width == 1 {
 		return "…"
 	}
-	runes := []rune(text)
-	for len(runes) > 0 && lipgloss.Width(string(runes))+1 > width {
-		runes = runes[:len(runes)-1]
-	}
-	return string(runes) + "…"
+	return xansi.Truncate(text, width, "…")
 }
 
 func (m *Model) reload() {
@@ -891,10 +909,10 @@ func trimLastRune(s string) string {
 }
 
 func (m Model) preview() string {
-	return strings.Join(m.previewLines(25), "\n")
+	return strings.Join(m.previewLines(25, defaultViewWidth), "\n")
 }
 
-func (m Model) previewLines(limit int) []string {
+func (m Model) previewLines(limit, width int) []string {
 	if limit <= 0 {
 		return nil
 	}
@@ -909,11 +927,7 @@ func (m Model) previewLines(limit int) []string {
 	if err != nil {
 		return []string{err.Error()}
 	}
-	lines := strings.Split(string(b), "\n")
-	if len(lines) > limit {
-		lines = lines[:limit]
-	}
-	return lines
+	return renderMarkdownPreview(string(b), m.showFrontmatter, width, limit)
 }
 
 func (m Model) statusLine() string {

@@ -138,6 +138,21 @@ The TUI SHALL allow users to read items and perform item actions from the keyboa
 - **WHEN** the user selects an item and presses `e`
 - **THEN** the TUI opens the item's current Markdown file using the configured editor command
 
+### Requirement: Markdown reader rendering
+The TUI SHALL render saved Markdown content as readable terminal text in item preview or reader panes and SHALL hide YAML frontmatter by default.
+
+#### Scenario: Markdown is rendered for reading
+- **WHEN** the selected item's Markdown contains headings, emphasis, links, or lists
+- **THEN** the preview or reader pane presents rendered reading text rather than raw Markdown markup
+
+#### Scenario: Frontmatter is hidden by default
+- **WHEN** the selected item's Markdown file starts with YAML frontmatter
+- **THEN** the preview or reader pane omits frontmatter fields unless frontmatter display is enabled
+
+#### Scenario: Frontmatter display is toggled
+- **WHEN** the user presses `m` while viewing an item
+- **THEN** the TUI toggles whether the selected item's YAML frontmatter is shown before the rendered article content
+
 ### Requirement: TUI sync controls
 The TUI SHALL support manual and periodic sync while running.
 

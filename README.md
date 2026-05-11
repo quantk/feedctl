@@ -74,7 +74,9 @@ Sections: `1` Inbox, `2` Unread, `3` Starred, `4` Sources, `5` Removed Sources, 
 
 Search/filter: `/` search with `n/N` next/previous, `f` live-filter items, `F` clear filter, `A` toggle removed-source items.
 
-Item actions: `Enter/l` open, `Space` read/unread, `u` unread, `s` star, `a` archive from inbox, `o` open URL, `e` edit Markdown.
+Item actions: `Enter/l` open, `Space` read/unread, `u` unread, `s` star, `a` archive from inbox, `o` open URL, `e` edit Markdown, `m` show/hide Markdown frontmatter.
+
+Reader/preview renders Markdown by default and hides YAML frontmatter unless `m` is enabled.
 
 Sync: `r` refresh, `R` sync all.
 
