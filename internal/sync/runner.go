@@ -47,7 +47,7 @@ type SourceResult struct {
 }
 
 func NewRunner(st *store.DB, paths config.Paths, cfg config.Config) *Runner {
-	return &Runner{Store: st, Paths: paths, Config: cfg, Adapter: source.NewRSSAdapter(), Metrics: metrics.DefaultEnricher()}
+	return &Runner{Store: st, Paths: paths, Config: cfg, Adapter: source.NewDefaultAdapter(), Metrics: metrics.DefaultEnricher()}
 }
 
 func (r *Runner) RunAll(ctx context.Context, sources []config.Source, opts Options) Result {

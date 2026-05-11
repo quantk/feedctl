@@ -1,6 +1,7 @@
 package config
 
 import (
+	"errors"
 	"os"
 	"path/filepath"
 	"testing"
@@ -43,6 +44,60 @@ func TestLoadSourceValidation(t *testing.T) {
 	_, err := LoadForHome(home)
 	if err == nil {
 		t.Fatal("expected validation error")
+	}
+}
+
+func TestLoadTelegramSourceWithMaxItems(t *testing.T) {
+	home := t.TempDir()
+	cfgDir := filepath.Join(home, "cfg")
+	sourcesDir := filepath.Join(cfgDir, "sources.d")
+	t.Setenv("FEEDCTL_CONFIG_DIR", cfgDir)
+	if err := os.MkdirAll(sourcesDir, 0o755); err != nil {
+		t.Fatal(err)
+	}
+	path := filepath.Join(sourcesDir, "telegram.toml")
+	data := []byte("id = \"tg-example\"\ntype = \"telegram\"\nname = \"Example Channel\"\nurl = \"https://t.me/s/example\"\nenabled = true\ninterval = \"15m\"\ntags = [\"telegram\", \"ai\"]\nmax_items = 75\n")
+	if err := os.WriteFile(path, data, 0o644); err != nil {
+		t.Fatal(err)
+	}
+
+	loaded, err := LoadForHome(home)
+	if err != nil {
+		t.Fatalf("load telegram source: %v", err)
+	}
+	if len(loaded.Sources) != 1 {
+		t.Fatalf("sources len=%d", len(loaded.Sources))
+	}
+	src := loaded.Sources[0]
+	if src.Type != SourceTypeTelegram || src.MaxItems != 75 || src.URL != "https://t.me/s/example" {
+		t.Fatalf("bad telegram source: %#v", src)
+	}
+}
+
+func TestLoadRejectsUnsupportedSourceType(t *testing.T) {
+	home := t.TempDir()
+	cfgDir := filepath.Join(home, "cfg")
+	sourcesDir := filepath.Join(cfgDir, "sources.d")
+	t.Setenv("FEEDCTL_CONFIG_DIR", cfgDir)
+	if err := os.MkdirAll(sourcesDir, 0o755); err != nil {
+		t.Fatal(err)
+	}
+	path := filepath.Join(sourcesDir, "bad.toml")
+	data := []byte("id = \"bad\"\ntype = \"html\"\nname = \"Bad\"\nurl = \"https://example.com\"\nenabled = true\n")
+	if err := os.WriteFile(path, data, 0o644); err != nil {
+		t.Fatal(err)
+	}
+
+	_, err := LoadForHome(home)
+	if err == nil {
+		t.Fatal("expected unsupported source type error")
+	}
+	var validationErrs ValidationErrors
+	if !errors.As(err, &validationErrs) {
+		t.Fatalf("expected validation errors, got %T %v", err, err)
+	}
+	if len(validationErrs) != 1 || validationErrs[0].Code != "unsupported-source-type" {
+		t.Fatalf("expected unsupported-source-type, got %#v", validationErrs)
 	}
 }
 

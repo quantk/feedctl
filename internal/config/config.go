@@ -18,6 +18,7 @@ import (
 const (
 	DefaultPathTemplate = "{source_id}/{year}/{month}/{slug}.md"
 	SourceTypeRSS       = "rss"
+	SourceTypeTelegram  = "telegram"
 )
 
 var (
@@ -83,6 +84,7 @@ type Source struct {
 	Enabled  bool     `toml:"enabled" json:"enabled"`
 	Interval string   `toml:"interval,omitempty" json:"interval,omitempty"`
 	Tags     []string `toml:"tags,omitempty" json:"tags,omitempty"`
+	MaxItems int      `toml:"max_items,omitempty" json:"max_items,omitempty"`
 	FilePath string   `toml:"-" json:"file_path,omitempty"`
 }
 
@@ -308,8 +310,8 @@ func (l Loaded) Validate() error {
 		}
 		if src.Type == "" {
 			errs = append(errs, ValidationError{Path: src.FilePath, Field: "type", Code: "missing-source-type", Message: "source type is required"})
-		} else if src.Type != SourceTypeRSS {
-			errs = append(errs, ValidationError{Path: src.FilePath, Field: "type", Code: "unsupported-source-type", Message: "only rss sources are supported in the MVP"})
+		} else if src.Type != SourceTypeRSS && src.Type != SourceTypeTelegram {
+			errs = append(errs, ValidationError{Path: src.FilePath, Field: "type", Code: "unsupported-source-type", Message: "only rss and telegram sources are supported"})
 		}
 		if src.URL == "" {
 			errs = append(errs, ValidationError{Path: src.FilePath, Field: "url", Code: "missing-source-url", Message: "source url is required"})

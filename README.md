@@ -1,6 +1,6 @@
 # feedctl
 
-`feedctl` is a local-first terminal content inbox. The MVP supports RSS sources, stores declarative config under `~/.config/feedctl`, stores runtime state under `~/.feedctl/feedctl.db`, and saves fetched items as Markdown under `~/.feedctl/content`.
+`feedctl` is a local-first terminal content inbox. The MVP supports RSS feeds and public Telegram channels, stores declarative config under `~/.config/feedctl`, stores runtime state under `~/.feedctl/feedctl.db`, and saves fetched items as Markdown under `~/.feedctl/content`.
 
 ## Build
 
@@ -23,7 +23,7 @@ Source files live one source per file:
 ~/.config/feedctl/sources.d/<source-id>.toml
 ```
 
-Example source file:
+Example RSS source file:
 
 ```toml
 id = "example"
@@ -34,6 +34,21 @@ enabled = true
 interval = "10m"
 tags = ["tech", "blog"]
 ```
+
+Example public Telegram source file:
+
+```toml
+id = "tg-llm-under-hood"
+type = "telegram"
+name = "LLM под капотом"
+url = "https://t.me/s/llm_under_hood"
+enabled = true
+interval = "10m"
+tags = ["telegram", "llm"]
+max_items = 50
+```
+
+Telegram support uses the public web view (`https://t.me/s/<channel>`). It does not use MTProto, does not require login/session secrets, does not support private channels, and does not download media files locally.
 
 Runtime fields such as `last_sync_at`, `last_error`, `etag`, read state, hashes, versions, and disk usage belong in SQLite, not TOML config.
 
@@ -46,6 +61,8 @@ feedctl config path           # show effective paths
 feedctl config validate       # validate config/source files
 feedctl add rss URL           # create RSS source config
 feedctl add rss URL --dry-run --json
+feedctl add telegram @channel # create public Telegram source config
+feedctl add telegram https://t.me/channel --max-items 50 --dry-run --json
 feedctl sources list
 feedctl sources show ID
 feedctl sources test ID

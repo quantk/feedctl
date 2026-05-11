@@ -4,6 +4,7 @@ go 1.25.5
 
 require (
 	github.com/JohannesKaufmann/html-to-markdown v1.6.0
+	github.com/PuerkitoBio/goquery v1.9.2
 	github.com/charmbracelet/bubbletea v1.3.10
 	github.com/charmbracelet/glamour v0.7.0
 	github.com/charmbracelet/lipgloss v1.1.0
@@ -15,7 +16,6 @@ require (
 )
 
 require (
-	github.com/PuerkitoBio/goquery v1.9.2 // indirect
 	github.com/alecthomas/chroma/v2 v2.20.0 // indirect
 	github.com/andybalholm/cascadia v1.3.2 // indirect
 	github.com/aymanbagabas/go-osc52/v2 v2.0.1 // indirect

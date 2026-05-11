@@ -104,6 +104,46 @@ func TestCLIConfigSourceAndJSONError(t *testing.T) {
 	}
 }
 
+func TestCLIAddTelegram(t *testing.T) {
+	testutil.IsolatedEnv(t)
+	page := testutil.TelegramWebPage("LLM под капотом", "llm_under_hood", []testutil.TelegramPost{
+		testutil.DefaultTelegramPost(831, `<b>Post 831</b><br/>Body`),
+	}, "")
+	server := testutil.TelegramServer(t, "llm_under_hood", map[string]string{"/s/llm_under_hood": page})
+
+	out, err := executeTestCommand(t, "--json", "add", "telegram", server.URL+"/s/llm_under_hood", "--id", "tg-llm", "--name", "LLM под капотом", "--tags", "telegram,llm", "--max-items", "25", "--dry-run")
+	if err != nil {
+		t.Fatalf("add telegram dry-run: %v", err)
+	}
+	if !strings.Contains(out, `"source_type": "telegram"`) || !strings.Contains(out, `"canonical_url": "`+server.URL+`/s/llm_under_hood"`) || !strings.Contains(out, `"dry_run": true`) {
+		t.Fatalf("bad add telegram dry-run output: %s", out)
+	}
+
+	out, err = executeTestCommand(t, "add", "telegram", server.URL+"/s/llm_under_hood", "--id", "tg-llm", "--tags", "telegram", "--max-items", "25")
+	if err != nil {
+		t.Fatalf("add telegram: %v", err)
+	}
+	if !strings.Contains(out, "Created Telegram source tg-llm") {
+		t.Fatalf("bad add telegram output: %s", out)
+	}
+
+	out, err = executeTestCommand(t, "sources", "test", "tg-llm")
+	if err != nil {
+		t.Fatalf("sources test telegram: %v", err)
+	}
+	if !strings.Contains(out, "ok: tg-llm items=1") || !strings.Contains(out, "LLM под капотом") {
+		t.Fatalf("bad telegram source test output: %s", out)
+	}
+
+	out, err = executeTestCommand(t, "--json", "sources", "test", "tg-llm")
+	if err != nil {
+		t.Fatalf("sources test telegram json: %v", err)
+	}
+	if !strings.Contains(out, `"items_found": 1`) || !strings.Contains(out, `"title": "LLM под капотом"`) {
+		t.Fatalf("bad telegram source test json output: %s", out)
+	}
+}
+
 func executeTestCommand(t *testing.T, args ...string) (string, error) {
 	t.Helper()
 	opts := &options{}

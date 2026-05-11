@@ -60,6 +60,25 @@ type AddRSSResult struct {
 	Metadata   source.Metadata `json:"metadata"`
 }
 
+type AddTelegramParams struct {
+	ID       string
+	Name     string
+	Tags     []string
+	MaxItems int
+	DryRun   bool
+}
+
+type AddTelegramResult struct {
+	Action       string          `json:"action"`
+	DryRun       bool            `json:"dry_run"`
+	SourceID     string          `json:"source_id"`
+	SourceType   string          `json:"source_type"`
+	ConfigPath   string          `json:"config_path"`
+	CanonicalURL string          `json:"canonical_url"`
+	ItemsFound   int             `json:"items_found"`
+	Metadata     source.Metadata `json:"metadata"`
+}
+
 type RemoveResult struct {
 	Action       string `json:"action"`
 	DryRun       bool   `json:"dry_run"`
@@ -177,6 +196,55 @@ func AddRSS(ctx context.Context, rawURL string, p AddRSSParams) (AddRSSResult, e
 	return res, nil
 }
 
+func AddTelegram(ctx context.Context, rawChannel string, p AddTelegramParams) (AddTelegramResult, error) {
+	loaded, err := config.Load()
+	if err != nil {
+		return AddTelegramResult{}, err
+	}
+	if err := config.EnsureConfigDirs(loaded.Paths); err != nil {
+		return AddTelegramResult{}, err
+	}
+	channel, err := source.NormalizeTelegramChannelInput(rawChannel)
+	if err != nil {
+		return AddTelegramResult{}, AppError("invalid-url", "invalid Telegram channel", err)
+	}
+	adapter := source.NewTelegramAdapter()
+	testSource := config.Source{ID: "test", Type: config.SourceTypeTelegram, Name: p.Name, URL: channel.PublicURL, Enabled: true, Tags: p.Tags, MaxItems: p.MaxItems}
+	metadata, err := adapter.Test(ctx, testSource)
+	if err != nil {
+		return AddTelegramResult{}, AppError("source-test-failed", "Telegram channel could not be fetched or parsed", err)
+	}
+	name := strings.TrimSpace(p.Name)
+	if name == "" {
+		name = metadata.Title
+	}
+	if name == "" {
+		name = channel.Channel
+	}
+	id := strings.TrimSpace(p.ID)
+	if id == "" {
+		id = strings.ToLower(channel.Channel)
+	}
+	if !config.ValidateSourceID(id) {
+		return AddTelegramResult{}, AppError("invalid-source-id", "source id is not file-safe", nil)
+	}
+	path := config.SourcePath(loaded.Paths.SourcesDir, id)
+	if _, err := os.Stat(path); err == nil {
+		return AddTelegramResult{}, AppError("source-already-exists", "source already exists", nil)
+	} else if err != nil && !errors.Is(err, os.ErrNotExist) {
+		return AddTelegramResult{}, err
+	}
+	res := AddTelegramResult{Action: "create_source", DryRun: p.DryRun, SourceID: id, SourceType: config.SourceTypeTelegram, ConfigPath: path, CanonicalURL: channel.PublicURL, ItemsFound: metadata.ItemsFound, Metadata: metadata}
+	if p.DryRun {
+		return res, nil
+	}
+	src := config.Source{ID: id, Type: config.SourceTypeTelegram, Name: name, URL: channel.PublicURL, Enabled: true, Interval: loaded.Config.Sync.DefaultInterval, Tags: p.Tags, MaxItems: p.MaxItems}
+	if err := config.WriteSource(path, src); err != nil {
+		return AddTelegramResult{}, err
+	}
+	return res, nil
+}
+
 func (a *App) Sources(includeRemoved bool) ([]store.Source, error) {
 	return a.Store.ListSources(includeRemoved)
 }
@@ -194,7 +262,7 @@ func (a *App) TestSource(ctx context.Context, id string) (source.Metadata, error
 	if err != nil {
 		return source.Metadata{}, err
 	}
-	return source.NewRSSAdapter().Test(ctx, src)
+	return source.NewDefaultAdapter().Test(ctx, src)
 }
 
 func (a *App) SetSourceEnabled(id string, enabled bool, dryRun bool) (config.Source, error) {
