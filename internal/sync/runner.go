@@ -12,6 +12,7 @@ import (
 
 	"feedctl/internal/config"
 	"feedctl/internal/content"
+	"feedctl/internal/metrics"
 	"feedctl/internal/source"
 	"feedctl/internal/store"
 )
@@ -21,6 +22,7 @@ type Runner struct {
 	Paths   config.Paths
 	Config  config.Config
 	Adapter source.Adapter
+	Metrics *metrics.Enricher
 }
 
 type Options struct {
@@ -45,7 +47,7 @@ type SourceResult struct {
 }
 
 func NewRunner(st *store.DB, paths config.Paths, cfg config.Config) *Runner {
-	return &Runner{Store: st, Paths: paths, Config: cfg, Adapter: source.NewRSSAdapter()}
+	return &Runner{Store: st, Paths: paths, Config: cfg, Adapter: source.NewRSSAdapter(), Metrics: metrics.DefaultEnricher()}
 }
 
 func (r *Runner) RunAll(ctx context.Context, sources []config.Source, opts Options) Result {
@@ -111,10 +113,9 @@ func (r *Runner) RunSource(ctx context.Context, src config.Source) SourceResult 
 }
 
 func (r *Runner) runSourceClassified(ctx context.Context, src config.Source, feed source.Feed) SourceResult {
-	_ = ctx
 	res := SourceResult{SourceID: src.ID, ItemsFound: len(feed.Items), Status: "ok"}
 	for _, feedItem := range feed.Items {
-		classification, err := r.processItemClassified(src, feedItem)
+		classification, err := r.processItemClassified(ctx, src, feedItem)
 		if err != nil {
 			res.Errors = append(res.Errors, err.Error())
 			continue
@@ -138,11 +139,11 @@ func (r *Runner) runSourceClassified(ctx context.Context, src config.Source, fee
 }
 
 func (r *Runner) processItem(src config.Source, item source.Item) error {
-	_, err := r.processItemClassified(src, item)
+	_, err := r.processItemClassified(context.Background(), src, item)
 	return err
 }
 
-func (r *Runner) processItemClassified(src config.Source, item source.Item) (string, error) {
+func (r *Runner) processItemClassified(ctx context.Context, src config.Source, item source.Item) (string, error) {
 	identity, kind := source.Identity(src.ID, item)
 	itemID := "item_" + content.ShortID(src.ID+"\x00"+identity)
 	fetched := time.Now().UTC()
@@ -174,15 +175,23 @@ func (r *Runner) processItemClassified(src config.Source, item source.Item) (str
 		if _, _, err := content.SafeWrite(r.Paths.ContentDir, rel, r.Paths.TmpDir, rendered); err != nil {
 			return "", fmt.Errorf("write markdown for %s: %w", itemID, err)
 		}
-		return "new", r.Store.CreateItem(store.Item{
+		if err := r.Store.CreateItem(store.Item{
 			ID: itemID, SourceID: src.ID, SourceItemID: identity, IdentityKind: kind,
 			Title: item.Title, URL: item.URL, CanonicalURL: item.CanonicalURL, PublishedAt: publishedString,
 			FetchedAt: fetched.Format(time.RFC3339), LastSeenAt: fetched.Format(time.RFC3339), ContentPath: rel,
 			ContentHash: hash, Version: 1, Tags: item.Tags,
-		})
+		}); err != nil {
+			return "", err
+		}
+		r.enrichItemMetrics(ctx, src, itemID, item)
+		return "new", nil
 	}
 	if existing.ContentHash == hash {
-		return "unchanged", r.Store.UpdateItemSeen(existing.ID)
+		if err := r.Store.UpdateItemSeen(existing.ID); err != nil {
+			return "", err
+		}
+		r.enrichItemMetrics(ctx, src, existing.ID, item)
+		return "unchanged", nil
 	}
 	currentPath := filepath.Join(r.Paths.ContentDir, existing.ContentPath)
 	versionRel, versionSize, err := content.SaveVersion(r.Paths.VersionsDir, existing.ID, existing.Version, currentPath, r.Paths.TmpDir)
@@ -211,7 +220,28 @@ func (r *Runner) processItemClassified(src config.Source, item source.Item) (str
 	existing.Version = newVersion
 	existing.UpdatedAt = fetched.Format(time.RFC3339)
 	existing.Tags = item.Tags
-	return "updated", r.Store.UpdateItemChanged(existing)
+	if err := r.Store.UpdateItemChanged(existing); err != nil {
+		return "", err
+	}
+	r.enrichItemMetrics(ctx, src, existing.ID, item)
+	return "updated", nil
+}
+
+func (r *Runner) enrichItemMetrics(ctx context.Context, src config.Source, itemID string, item source.Item) {
+	if r.Metrics == nil {
+		return
+	}
+	itemMetrics, matched, err := r.Metrics.Fetch(ctx, metrics.Candidate{
+		SourceID:     src.ID,
+		SourceType:   src.Type,
+		Title:        item.Title,
+		URL:          item.URL,
+		CanonicalURL: item.CanonicalURL,
+	})
+	if err != nil || !matched {
+		return
+	}
+	_ = r.Store.UpsertItemMetrics(itemID, itemMetrics)
 }
 
 func ReconcileStorage(st *store.DB, paths config.Paths) error {

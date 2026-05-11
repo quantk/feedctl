@@ -6,6 +6,7 @@ import (
 	"testing"
 
 	"feedctl/internal/app"
+	"feedctl/internal/metrics"
 	"feedctl/internal/store"
 	"feedctl/internal/testutil"
 
@@ -217,6 +218,66 @@ func TestFilterItemsMatchesUnicodeCaseInsensitive(t *testing.T) {
 	filtered := filterItems(items, "при")
 	if len(filtered) != 1 || filtered[0].Title != "Привет мир" {
 		t.Fatalf("filtered=%#v", filtered)
+	}
+}
+
+func TestTUIItemRowRendersMetrics(t *testing.T) {
+	score := 12
+	comments := 4
+	zero := 0
+	m := Model{}
+
+	row := m.renderItemRow(store.Item{Title: "Metric title", SourceID: "habr-ai", Metrics: &metrics.ItemMetrics{Score: &score, CommentsCount: &comments}}, false, 80)
+	if !strings.Contains(row, "+12") || !strings.Contains(row, "4c") {
+		t.Fatalf("row missing compact metrics: %q", row)
+	}
+
+	row = m.renderItemRow(store.Item{Title: "Plain title", SourceID: "src"}, false, 80)
+	if strings.Contains(row, "+0") || strings.Contains(row, "0c") {
+		t.Fatalf("row contains placeholder metrics: %q", row)
+	}
+
+	row = m.renderItemRow(store.Item{Title: "Zero title", SourceID: "src", Metrics: &metrics.ItemMetrics{Score: &zero}}, false, 80)
+	if !strings.Contains(row, "0") {
+		t.Fatalf("row missing known zero score: %q", row)
+	}
+}
+
+func TestTUIPreviewRendersExpandedMetrics(t *testing.T) {
+	testutil.IsolatedEnv(t)
+	feed := testutil.RSSFeed("Example", testutil.DefaultItem("guid-1", "Metric title", "Body"))
+	server := testutil.FeedServer(t, &feed)
+	defer server.Close()
+	if _, err := app.AddRSS(context.Background(), server.URL, app.AddRSSParams{ID: "example", Name: "Example"}); err != nil {
+		t.Fatal(err)
+	}
+	a, err := app.Open(context.Background())
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer a.Close()
+	res := a.Sync(context.Background(), "")
+	if !res.OK {
+		t.Fatalf("sync: %#v", res)
+	}
+	items, err := a.Items(store.ItemFilter{})
+	if err != nil {
+		t.Fatal(err)
+	}
+	score := 12
+	comments := 4
+	votes := 5
+	reads := 23
+	if err := a.Store.UpsertItemMetrics(items[0].ID, metrics.ItemMetrics{Provider: "habr", Score: &score, CommentsCount: &comments, VotesCount: &votes, ReadingCount: &reads, FetchedAt: "2026-05-11T15:00:00Z"}); err != nil {
+		t.Fatal(err)
+	}
+
+	m := NewModel(a)
+	preview := m.renderPreviewPane(80, 14)
+	for _, want := range []string{"Score: +12", "Comments: 4", "Votes: 5", "Reads: 23"} {
+		if !strings.Contains(preview, want) {
+			t.Fatalf("preview missing %q:\n%s", want, preview)
+		}
 	}
 }
 

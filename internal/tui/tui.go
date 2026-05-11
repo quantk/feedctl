@@ -9,6 +9,7 @@ import (
 
 	"feedctl/internal/app"
 	"feedctl/internal/config"
+	"feedctl/internal/metrics"
 	"feedctl/internal/store"
 
 	tea "github.com/charmbracelet/bubbletea"
@@ -449,19 +450,72 @@ func (m Model) renderItemRow(item store.Item, selected bool, width int) string {
 	if item.Starred {
 		star = starMarkerStyle.Render("★")
 	}
+	metricsText := formatCompactMetrics(item.Metrics)
 	source := " [" + item.SourceID + "]"
-	sourceWidth := lipgloss.Width(source)
-	titleWidth := width - 6 - sourceWidth
+	suffix := source
+	if metricsText != "" {
+		suffix = " " + metricsText + source
+	}
+	titleWidth := width - 6 - lipgloss.Width(suffix)
+	if titleWidth < 8 && metricsText != "" {
+		metricsText = ""
+		suffix = source
+		titleWidth = width - 6 - lipgloss.Width(suffix)
+	}
 	if titleWidth < 8 {
 		titleWidth = width - 6
-		source = ""
+		suffix = ""
 	}
 	if titleWidth < 1 {
 		titleWidth = 1
 	}
 	title := truncateText(item.Title, titleWidth)
-	row := markerStyle.Render(marker) + baseStyle.Render(" ") + read + star + baseStyle.Render(" ") + baseStyle.Render(title) + mutedRowStyle.Render(source)
+	row := markerStyle.Render(marker) + baseStyle.Render(" ") + read + star + baseStyle.Render(" ") + baseStyle.Render(title) + mutedRowStyle.Render(suffix)
 	return fillStyled(row, width, baseStyle)
+}
+
+func formatCompactMetrics(itemMetrics *metrics.ItemMetrics) string {
+	if itemMetrics == nil {
+		return ""
+	}
+	var parts []string
+	if itemMetrics.Score != nil {
+		parts = append(parts, formatScore(*itemMetrics.Score))
+	}
+	if itemMetrics.CommentsCount != nil {
+		parts = append(parts, fmt.Sprintf("%dc", *itemMetrics.CommentsCount))
+	}
+	return strings.Join(parts, " · ")
+}
+
+func formatExpandedMetrics(itemMetrics *metrics.ItemMetrics) string {
+	if itemMetrics == nil {
+		return ""
+	}
+	var parts []string
+	if itemMetrics.Score != nil {
+		parts = append(parts, "Score: "+formatScore(*itemMetrics.Score))
+	}
+	if itemMetrics.CommentsCount != nil {
+		parts = append(parts, fmt.Sprintf("Comments: %d", *itemMetrics.CommentsCount))
+	}
+	if itemMetrics.VotesCount != nil {
+		parts = append(parts, fmt.Sprintf("Votes: %d", *itemMetrics.VotesCount))
+	}
+	if itemMetrics.FavoritesCount != nil {
+		parts = append(parts, fmt.Sprintf("Favorites: %d", *itemMetrics.FavoritesCount))
+	}
+	if itemMetrics.ReadingCount != nil {
+		parts = append(parts, fmt.Sprintf("Reads: %d", *itemMetrics.ReadingCount))
+	}
+	return strings.Join(parts, " · ")
+}
+
+func formatScore(score int) string {
+	if score > 0 {
+		return fmt.Sprintf("+%d", score)
+	}
+	return fmt.Sprintf("%d", score)
 }
 
 func (m Model) renderSourceRow(src store.Source, selected bool, width int) string {
@@ -537,6 +591,9 @@ func (m Model) renderPreviewPane(width, height int) string {
 	item := m.items[m.cursor]
 	lines = append(lines, renderPlainLine(" "+item.Title, width, accentStyle))
 	lines = append(lines, renderPlainLine(" "+item.SourceID+" · "+item.PublishedAt, width, mutedStyle))
+	if metricsText := formatExpandedMetrics(item.Metrics); metricsText != "" {
+		lines = append(lines, renderPlainLine(" "+metricsText, width, mutedStyle))
+	}
 	lines = append(lines, renderPlainLine("", width, panelStyle))
 	for _, line := range m.previewLines(height - len(lines)) {
 		lines = append(lines, renderPlainLine(" "+line, width, panelStyle))

@@ -11,6 +11,7 @@ import (
 	"time"
 
 	"feedctl/internal/config"
+	"feedctl/internal/metrics"
 
 	_ "modernc.org/sqlite"
 )
@@ -37,25 +38,26 @@ type Source struct {
 }
 
 type Item struct {
-	ID              string   `json:"id"`
-	SourceID        string   `json:"source_id"`
-	SourceItemID    string   `json:"source_item_id"`
-	IdentityKind    string   `json:"identity_kind"`
-	Title           string   `json:"title"`
-	URL             string   `json:"url"`
-	CanonicalURL    string   `json:"canonical_url,omitempty"`
-	PublishedAt     string   `json:"published_at,omitempty"`
-	FetchedAt       string   `json:"fetched_at"`
-	LastSeenAt      string   `json:"last_seen_at"`
-	ContentPath     string   `json:"content_path"`
-	ContentHash     string   `json:"content_hash"`
-	Version         int      `json:"version"`
-	ReadAt          string   `json:"read_at,omitempty"`
-	Starred         bool     `json:"starred"`
-	ArchivedAt      string   `json:"archived_at,omitempty"`
-	UpdatedAt       string   `json:"updated_at,omitempty"`
-	SourceLifecycle string   `json:"source_lifecycle,omitempty"`
-	Tags            []string `json:"tags,omitempty"`
+	ID              string               `json:"id"`
+	SourceID        string               `json:"source_id"`
+	SourceItemID    string               `json:"source_item_id"`
+	IdentityKind    string               `json:"identity_kind"`
+	Title           string               `json:"title"`
+	URL             string               `json:"url"`
+	CanonicalURL    string               `json:"canonical_url,omitempty"`
+	PublishedAt     string               `json:"published_at,omitempty"`
+	FetchedAt       string               `json:"fetched_at"`
+	LastSeenAt      string               `json:"last_seen_at"`
+	ContentPath     string               `json:"content_path"`
+	ContentHash     string               `json:"content_hash"`
+	Version         int                  `json:"version"`
+	ReadAt          string               `json:"read_at,omitempty"`
+	Starred         bool                 `json:"starred"`
+	ArchivedAt      string               `json:"archived_at,omitempty"`
+	UpdatedAt       string               `json:"updated_at,omitempty"`
+	SourceLifecycle string               `json:"source_lifecycle,omitempty"`
+	Tags            []string             `json:"tags,omitempty"`
+	Metrics         *metrics.ItemMetrics `json:"metrics,omitempty"`
 }
 
 type ItemVersion struct {
@@ -161,6 +163,13 @@ func (d *DB) Migrate() error {
 			tags_json TEXT NOT NULL DEFAULT '[]',
 			UNIQUE(source_id, source_item_id),
 			FOREIGN KEY(source_id) REFERENCES runtime_sources(id)
+		)`,
+		`CREATE TABLE IF NOT EXISTS item_metrics (
+			item_id TEXT PRIMARY KEY,
+			provider TEXT NOT NULL,
+			fetched_at TEXT NOT NULL,
+			metrics_json TEXT NOT NULL,
+			FOREIGN KEY(item_id) REFERENCES items(id)
 		)`,
 		`CREATE INDEX IF NOT EXISTS idx_items_source ON items(source_id)`,
 		`CREATE INDEX IF NOT EXISTS idx_items_content_path ON items(content_path)`,
@@ -336,6 +345,20 @@ func (d *DB) UpdateItemChanged(item Item) error {
 	return err
 }
 
+func (d *DB) UpsertItemMetrics(itemID string, itemMetrics metrics.ItemMetrics) error {
+	if itemMetrics.FetchedAt == "" {
+		itemMetrics.FetchedAt = nowString()
+	}
+	data, err := json.Marshal(itemMetrics)
+	if err != nil {
+		return err
+	}
+	_, err = d.db.Exec(`INSERT INTO item_metrics(item_id, provider, fetched_at, metrics_json) VALUES (?, ?, ?, ?)
+		ON CONFLICT(item_id) DO UPDATE SET provider=excluded.provider, fetched_at=excluded.fetched_at, metrics_json=excluded.metrics_json`,
+		itemID, itemMetrics.Provider, itemMetrics.FetchedAt, string(data))
+	return err
+}
+
 func (d *DB) AddItemVersion(v ItemVersion) error {
 	_, err := d.db.Exec(`INSERT OR REPLACE INTO item_versions(id, item_id, version, content_path, content_hash, created_at, size_bytes) VALUES (?, ?, ?, ?, ?, ?, ?)`,
 		v.ID, v.ItemID, v.Version, v.ContentPath, v.ContentHash, v.CreatedAt, v.SizeBytes)
@@ -500,18 +523,34 @@ func scanSource(s scanner) (Source, error) {
 }
 
 func itemSelect() string {
-	return `SELECT i.id, i.source_id, i.source_item_id, i.identity_kind, i.title, i.url, i.canonical_url, i.published_at, i.fetched_at, i.last_seen_at, i.content_path, i.content_hash, i.version, i.read_at, i.starred, i.archived_at, i.updated_at, i.tags_json, s.lifecycle FROM items i JOIN runtime_sources s ON s.id=i.source_id`
+	return `SELECT i.id, i.source_id, i.source_item_id, i.identity_kind, i.title, i.url, i.canonical_url, i.published_at, i.fetched_at, i.last_seen_at, i.content_path, i.content_hash, i.version, i.read_at, i.starred, i.archived_at, i.updated_at, i.tags_json, s.lifecycle, im.provider, im.fetched_at, im.metrics_json FROM items i JOIN runtime_sources s ON s.id=i.source_id LEFT JOIN item_metrics im ON im.item_id=i.id`
 }
 
 func scanItem(s scanner) (Item, error) {
 	var out Item
 	var starred int
 	var tags string
-	if err := s.Scan(&out.ID, &out.SourceID, &out.SourceItemID, &out.IdentityKind, &out.Title, &out.URL, &out.CanonicalURL, &out.PublishedAt, &out.FetchedAt, &out.LastSeenAt, &out.ContentPath, &out.ContentHash, &out.Version, &out.ReadAt, &starred, &out.ArchivedAt, &out.UpdatedAt, &tags, &out.SourceLifecycle); err != nil {
+	var metricProvider sql.NullString
+	var metricFetchedAt sql.NullString
+	var metricJSON sql.NullString
+	if err := s.Scan(&out.ID, &out.SourceID, &out.SourceItemID, &out.IdentityKind, &out.Title, &out.URL, &out.CanonicalURL, &out.PublishedAt, &out.FetchedAt, &out.LastSeenAt, &out.ContentPath, &out.ContentHash, &out.Version, &out.ReadAt, &starred, &out.ArchivedAt, &out.UpdatedAt, &tags, &out.SourceLifecycle, &metricProvider, &metricFetchedAt, &metricJSON); err != nil {
 		return out, err
 	}
 	out.Starred = starred == 1
 	_ = json.Unmarshal([]byte(tags), &out.Tags)
+	if metricProvider.Valid || metricFetchedAt.Valid || metricJSON.Valid {
+		var itemMetrics metrics.ItemMetrics
+		if metricJSON.Valid && metricJSON.String != "" {
+			_ = json.Unmarshal([]byte(metricJSON.String), &itemMetrics)
+		}
+		if metricProvider.Valid {
+			itemMetrics.Provider = metricProvider.String
+		}
+		if metricFetchedAt.Valid {
+			itemMetrics.FetchedAt = metricFetchedAt.String
+		}
+		out.Metrics = &itemMetrics
+	}
 	return out, nil
 }
 
