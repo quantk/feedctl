@@ -12,6 +12,18 @@ import (
 	"feedctl/internal/testutil"
 )
 
+func TestCLIRootHelpListsCoreCommands(t *testing.T) {
+	out, err := executeTestCommand(t, "--help")
+	if err != nil {
+		t.Fatalf("help: %v", err)
+	}
+	for _, command := range []string{"tui", "sync", "add", "sources", "config", "items", "storage", "status"} {
+		if !strings.Contains(out, command) {
+			t.Fatalf("help output missing %q:\n%s", command, out)
+		}
+	}
+}
+
 func TestCLIConfigSourceAndJSONError(t *testing.T) {
 	testutil.IsolatedEnv(t)
 	feed := testutil.RSSFeed("Example", testutil.DefaultItem("guid-1", "First", "Body"))
