@@ -4,7 +4,9 @@ import (
 	"context"
 	"fmt"
 	"os"
+	"os/signal"
 	"strings"
+	"syscall"
 
 	"feedctl/internal/app"
 	"feedctl/internal/config"
@@ -21,7 +23,9 @@ func Execute() int {
 	root.SetErr(os.Stderr)
 	root.SilenceUsage = true
 	root.SilenceErrors = true
-	if err := root.ExecuteContext(context.Background()); err != nil {
+	ctx, stop := signal.NotifyContext(context.Background(), os.Interrupt, syscall.SIGTERM)
+	defer stop()
+	if err := root.ExecuteContext(ctx); err != nil {
 		if opts.JSON {
 			_ = writeError(os.Stdout, err)
 		} else {

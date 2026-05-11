@@ -7,6 +7,7 @@ import (
 	"fmt"
 	"os"
 	"path/filepath"
+	"sort"
 	"strings"
 	"time"
 
@@ -120,84 +121,161 @@ func (d *DB) Close() error {
 	return d.db.Close()
 }
 
+type migration struct {
+	version int
+	up      func(*sql.Tx) error
+}
+
+var migrations = []migration{
+	{version: 1, up: func(tx *sql.Tx) error {
+		for _, stmt := range initialSchemaStatements {
+			if _, err := tx.Exec(stmt); err != nil {
+				return err
+			}
+		}
+		return nil
+	}},
+}
+
+var initialSchemaStatements = []string{
+	`CREATE TABLE IF NOT EXISTS runtime_sources (
+		id TEXT PRIMARY KEY,
+		type TEXT NOT NULL,
+		name TEXT NOT NULL,
+		url TEXT NOT NULL,
+		lifecycle TEXT NOT NULL,
+		enabled INTEGER NOT NULL,
+		interval TEXT NOT NULL DEFAULT '',
+		tags_json TEXT NOT NULL DEFAULT '[]',
+		last_sync_at TEXT NOT NULL DEFAULT '',
+		last_sync_status TEXT NOT NULL DEFAULT '',
+		last_error TEXT NOT NULL DEFAULT '',
+		etag TEXT NOT NULL DEFAULT '',
+		last_modified TEXT NOT NULL DEFAULT '',
+		removed_at TEXT NOT NULL DEFAULT '',
+		created_at TEXT NOT NULL,
+		updated_at TEXT NOT NULL
+	)`,
+	`CREATE TABLE IF NOT EXISTS items (
+		id TEXT PRIMARY KEY,
+		source_id TEXT NOT NULL,
+		source_item_id TEXT NOT NULL,
+		identity_kind TEXT NOT NULL,
+		title TEXT NOT NULL,
+		url TEXT NOT NULL,
+		canonical_url TEXT NOT NULL DEFAULT '',
+		published_at TEXT NOT NULL DEFAULT '',
+		fetched_at TEXT NOT NULL,
+		last_seen_at TEXT NOT NULL,
+		content_path TEXT NOT NULL,
+		content_hash TEXT NOT NULL,
+		version INTEGER NOT NULL,
+		read_at TEXT NOT NULL DEFAULT '',
+		starred INTEGER NOT NULL DEFAULT 0,
+		archived_at TEXT NOT NULL DEFAULT '',
+		updated_at TEXT NOT NULL DEFAULT '',
+		tags_json TEXT NOT NULL DEFAULT '[]',
+		UNIQUE(source_id, source_item_id),
+		FOREIGN KEY(source_id) REFERENCES runtime_sources(id)
+	)`,
+	`CREATE TABLE IF NOT EXISTS item_metrics (
+		item_id TEXT PRIMARY KEY,
+		provider TEXT NOT NULL,
+		fetched_at TEXT NOT NULL,
+		metrics_json TEXT NOT NULL,
+		FOREIGN KEY(item_id) REFERENCES items(id)
+	)`,
+	`CREATE INDEX IF NOT EXISTS idx_items_source ON items(source_id)`,
+	`CREATE INDEX IF NOT EXISTS idx_items_content_path ON items(content_path)`,
+	`CREATE INDEX IF NOT EXISTS idx_items_read ON items(read_at)`,
+	`CREATE TABLE IF NOT EXISTS item_versions (
+		id TEXT PRIMARY KEY,
+		item_id TEXT NOT NULL,
+		version INTEGER NOT NULL,
+		content_path TEXT NOT NULL,
+		content_hash TEXT NOT NULL,
+		created_at TEXT NOT NULL,
+		size_bytes INTEGER NOT NULL,
+		UNIQUE(item_id, version),
+		FOREIGN KEY(item_id) REFERENCES items(id)
+	)`,
+	`CREATE TABLE IF NOT EXISTS storage_stats (
+		scope TEXT PRIMARY KEY,
+		bytes INTEGER NOT NULL,
+		item_count INTEGER NOT NULL,
+		updated_at TEXT NOT NULL
+	)`,
+}
+
 func (d *DB) Migrate() error {
-	stmts := []string{
-		`PRAGMA foreign_keys = ON`,
-		`CREATE TABLE IF NOT EXISTS schema_migrations (version INTEGER PRIMARY KEY, applied_at TEXT NOT NULL)`,
-		`CREATE TABLE IF NOT EXISTS runtime_sources (
-			id TEXT PRIMARY KEY,
-			type TEXT NOT NULL,
-			name TEXT NOT NULL,
-			url TEXT NOT NULL,
-			lifecycle TEXT NOT NULL,
-			enabled INTEGER NOT NULL,
-			interval TEXT NOT NULL DEFAULT '',
-			tags_json TEXT NOT NULL DEFAULT '[]',
-			last_sync_at TEXT NOT NULL DEFAULT '',
-			last_sync_status TEXT NOT NULL DEFAULT '',
-			last_error TEXT NOT NULL DEFAULT '',
-			etag TEXT NOT NULL DEFAULT '',
-			last_modified TEXT NOT NULL DEFAULT '',
-			removed_at TEXT NOT NULL DEFAULT '',
-			created_at TEXT NOT NULL,
-			updated_at TEXT NOT NULL
-		)`,
-		`CREATE TABLE IF NOT EXISTS items (
-			id TEXT PRIMARY KEY,
-			source_id TEXT NOT NULL,
-			source_item_id TEXT NOT NULL,
-			identity_kind TEXT NOT NULL,
-			title TEXT NOT NULL,
-			url TEXT NOT NULL,
-			canonical_url TEXT NOT NULL DEFAULT '',
-			published_at TEXT NOT NULL DEFAULT '',
-			fetched_at TEXT NOT NULL,
-			last_seen_at TEXT NOT NULL,
-			content_path TEXT NOT NULL,
-			content_hash TEXT NOT NULL,
-			version INTEGER NOT NULL,
-			read_at TEXT NOT NULL DEFAULT '',
-			starred INTEGER NOT NULL DEFAULT 0,
-			archived_at TEXT NOT NULL DEFAULT '',
-			updated_at TEXT NOT NULL DEFAULT '',
-			tags_json TEXT NOT NULL DEFAULT '[]',
-			UNIQUE(source_id, source_item_id),
-			FOREIGN KEY(source_id) REFERENCES runtime_sources(id)
-		)`,
-		`CREATE TABLE IF NOT EXISTS item_metrics (
-			item_id TEXT PRIMARY KEY,
-			provider TEXT NOT NULL,
-			fetched_at TEXT NOT NULL,
-			metrics_json TEXT NOT NULL,
-			FOREIGN KEY(item_id) REFERENCES items(id)
-		)`,
-		`CREATE INDEX IF NOT EXISTS idx_items_source ON items(source_id)`,
-		`CREATE INDEX IF NOT EXISTS idx_items_content_path ON items(content_path)`,
-		`CREATE INDEX IF NOT EXISTS idx_items_read ON items(read_at)`,
-		`CREATE TABLE IF NOT EXISTS item_versions (
-			id TEXT PRIMARY KEY,
-			item_id TEXT NOT NULL,
-			version INTEGER NOT NULL,
-			content_path TEXT NOT NULL,
-			content_hash TEXT NOT NULL,
-			created_at TEXT NOT NULL,
-			size_bytes INTEGER NOT NULL,
-			UNIQUE(item_id, version),
-			FOREIGN KEY(item_id) REFERENCES items(id)
-		)`,
-		`CREATE TABLE IF NOT EXISTS storage_stats (
-			scope TEXT PRIMARY KEY,
-			bytes INTEGER NOT NULL,
-			item_count INTEGER NOT NULL,
-			updated_at TEXT NOT NULL
-		)`,
-		`INSERT OR IGNORE INTO schema_migrations(version, applied_at) VALUES (1, datetime('now'))`,
+	if _, err := d.db.Exec(`PRAGMA foreign_keys = ON`); err != nil {
+		return err
 	}
-	for _, stmt := range stmts {
-		if _, err := d.db.Exec(stmt); err != nil {
+	return d.applyMigrations(migrations)
+}
+
+func (d *DB) applyMigrations(steps []migration) error {
+	if _, err := d.db.Exec(`CREATE TABLE IF NOT EXISTS schema_migrations (version INTEGER PRIMARY KEY, applied_at TEXT NOT NULL)`); err != nil {
+		return err
+	}
+	applied, err := d.appliedMigrations()
+	if err != nil {
+		return err
+	}
+	ordered := append([]migration(nil), steps...)
+	sort.Slice(ordered, func(i, j int) bool { return ordered[i].version < ordered[j].version })
+	for _, step := range ordered {
+		if _, ok := applied[step.version]; ok {
+			continue
+		}
+		if err := d.applyMigration(step); err != nil {
+			return err
+		}
+		applied[step.version] = struct{}{}
+	}
+	return nil
+}
+
+func (d *DB) appliedMigrations() (map[int]struct{}, error) {
+	rows, err := d.db.Query(`SELECT version FROM schema_migrations`)
+	if err != nil {
+		return nil, err
+	}
+	defer rows.Close()
+	applied := map[int]struct{}{}
+	for rows.Next() {
+		var version int
+		if err := rows.Scan(&version); err != nil {
+			return nil, err
+		}
+		applied[version] = struct{}{}
+	}
+	return applied, rows.Err()
+}
+
+func (d *DB) applyMigration(step migration) error {
+	tx, err := d.db.Begin()
+	if err != nil {
+		return err
+	}
+	committed := false
+	defer func() {
+		if !committed {
+			_ = tx.Rollback()
+		}
+	}()
+	if step.up != nil {
+		if err := step.up(tx); err != nil {
 			return err
 		}
 	}
+	if _, err := tx.Exec(`INSERT INTO schema_migrations(version, applied_at) VALUES (?, datetime('now'))`, step.version); err != nil {
+		return err
+	}
+	if err := tx.Commit(); err != nil {
+		return err
+	}
+	committed = true
 	return nil
 }
 
@@ -363,6 +441,29 @@ func (d *DB) AddItemVersion(v ItemVersion) error {
 	_, err := d.db.Exec(`INSERT OR REPLACE INTO item_versions(id, item_id, version, content_path, content_hash, created_at, size_bytes) VALUES (?, ?, ?, ?, ?, ?, ?)`,
 		v.ID, v.ItemID, v.Version, v.ContentPath, v.ContentHash, v.CreatedAt, v.SizeBytes)
 	return err
+}
+
+func (d *DB) AddItemVersionAndUpdateItemChanged(v ItemVersion, item Item) error {
+	tx, err := d.db.Begin()
+	if err != nil {
+		return err
+	}
+	committed := false
+	defer func() {
+		if !committed {
+			_ = tx.Rollback()
+		}
+	}()
+	if _, err := tx.Exec(`INSERT OR REPLACE INTO item_versions(id, item_id, version, content_path, content_hash, created_at, size_bytes) VALUES (?, ?, ?, ?, ?, ?, ?)`,
+		v.ID, v.ItemID, v.Version, v.ContentPath, v.ContentHash, v.CreatedAt, v.SizeBytes); err != nil {
+		return err
+	}
+	if _, err := tx.Exec(`UPDATE items SET title=?, url=?, canonical_url=?, published_at=?, fetched_at=?, last_seen_at=?, content_path=?, content_hash=?, version=?, updated_at=?, tags_json=? WHERE id=?`,
+		item.Title, item.URL, item.CanonicalURL, item.PublishedAt, item.FetchedAt, item.LastSeenAt, item.ContentPath, item.ContentHash, item.Version, item.UpdatedAt, tagsJSON(item.Tags), item.ID); err != nil {
+		return err
+	}
+	committed = true
+	return tx.Commit()
 }
 
 func (d *DB) ListItems(filter ItemFilter) ([]Item, error) {

@@ -11,6 +11,7 @@ import (
 	"feedctl/internal/config"
 	"feedctl/internal/metrics"
 	"feedctl/internal/store"
+	feedSync "feedctl/internal/sync"
 
 	tea "github.com/charmbracelet/bubbletea"
 	"github.com/charmbracelet/lipgloss"
@@ -24,6 +25,7 @@ const (
 	minViewHeight     = 8
 	wideViewWidth     = 92
 	selectedMarker    = "┃"
+	multiSelectMarker = "✓"
 )
 
 var sections = []string{"Inbox", "Unread", "Starred", "Sources", "Removed Sources", "All Items"}
@@ -71,10 +73,13 @@ var (
 	helpTitleStyle      = lipgloss.NewStyle().Foreground(nord8).Background(nord0).Bold(true)
 )
 
-type syncMsg struct{ result any }
+type syncMsg struct {
+	results []feedSync.Result
+}
 type tickMsg struct{}
 
 type Model struct {
+	ctx             context.Context
 	app             *app.App
 	items           []store.Item
 	sources         []store.Source
@@ -86,6 +91,9 @@ type Model struct {
 	searchMode      bool
 	filterMode      bool
 	showFrontmatter bool
+	selecting       bool
+	selectionAnchor string
+	selectedItems   map[string]struct{}
 	search          string
 	filter          string
 	message         string
@@ -102,26 +110,33 @@ func Run(ctx context.Context) error {
 		return err
 	}
 	defer a.Close()
-	m := NewModel(a)
+	m := NewModelWithContext(ctx, a)
 	p := tea.NewProgram(m, tea.WithAltScreen())
 	_, err = p.Run()
 	return err
 }
 
 func NewModel(a *app.App) Model {
+	return NewModelWithContext(context.Background(), a)
+}
+
+func NewModelWithContext(ctx context.Context, a *app.App) Model {
+	if ctx == nil {
+		ctx = context.Background()
+	}
 	showRemoved := false
 	if a != nil {
 		showRemoved = a.Loaded.Config.TUI.ShowRemovedSources
 	}
-	m := Model{app: a, showRemoved: showRemoved, width: defaultViewWidth, height: defaultViewHeight, lastPeriodic: map[string]time.Time{}}
-	m.reload()
+	m := Model{ctx: ctx, app: a, showRemoved: showRemoved, selectedItems: map[string]struct{}{}, width: defaultViewWidth, height: defaultViewHeight, lastPeriodic: map[string]time.Time{}}
+	_ = m.reload()
 	return m
 }
 
 func (m Model) Init() tea.Cmd {
 	cmds := []tea.Cmd{tickCmd(m.interval())}
 	if m.app.Loaded.Config.Sync.SyncOnStartup {
-		cmds = append(cmds, syncCmd(m.app))
+		cmds = append(cmds, syncCmd(m.ctx, m.app))
 	}
 	return tea.Batch(cmds...)
 }
@@ -137,13 +152,17 @@ func (m Model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 		cmds := []tea.Cmd{tickCmd(m.interval())}
 		if len(due) > 0 {
 			m.syncing = true
-			cmds = append(cmds, syncSourcesCmd(m.app, due))
+			cmds = append(cmds, syncSourcesCmd(m.ctx, m.app, due))
 		}
 		return m, tea.Batch(cmds...)
 	case syncMsg:
 		m.syncing = false
-		m.message = "sync ok"
-		m.reload()
+		if msg.ok() {
+			m.message = "sync ok"
+		} else {
+			m.message = "sync failed: " + msg.errorText()
+		}
+		_ = m.reload()
 		return m, nil
 	case tea.KeyMsg:
 		key := msg.String()
@@ -169,11 +188,11 @@ func (m Model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 				m.filterMode = false
 			case "backspace":
 				m.filter = trimLastRune(m.filter)
-				m.reload()
+				_ = m.reload()
 			default:
 				if msg.Type == tea.KeyRunes && len(msg.Runes) > 0 {
 					m.filter += string(msg.Runes)
-					m.reload()
+					_ = m.reload()
 				}
 			}
 			return m, nil
@@ -193,7 +212,13 @@ func (m Model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 				return m, nil
 			}
 			return m, tea.Quit
-		case "esc", "h", "left":
+		case "esc":
+			if m.hasSelection() || m.selecting {
+				m.cancelSelection()
+			} else {
+				m.closeReader()
+			}
+		case "h", "left":
 			m.closeReader()
 		case "?":
 			m.help = true
@@ -203,9 +228,11 @@ func (m Model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 			m.move(-1)
 		case "g":
 			m.cursor = 0
+			m.updateSelectionRange()
 		case "G":
 			if m.listLen() > 0 {
 				m.cursor = m.listLen() - 1
+				m.updateSelectionRange()
 			}
 		case "ctrl+d":
 			m.move(10)
@@ -224,22 +251,44 @@ func (m Model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 			if m.section != 3 {
 				m.reader = true
 			}
+		case "v":
+			m.toggleSelection()
 		case " ":
-			m.withSelected(func(item store.Item) { _ = m.app.ToggleRead(item.ID) })
-			m.reload()
+			if m.hasSelection() {
+				m.batchToggleRead()
+			} else if err := m.withSelectedErr(func(item store.Item) error { return m.app.ToggleRead(item.ID) }); err != nil {
+				m.setError("toggle read failed", err)
+				return m, nil
+			}
+			_ = m.reload()
 		case "u":
-			m.withSelected(func(item store.Item) { _ = m.app.SetRead(item.ID, false) })
-			m.reload()
+			if m.hasSelection() {
+				m.batchSetRead(false)
+			} else if err := m.withSelectedErr(func(item store.Item) error { return m.app.SetRead(item.ID, false) }); err != nil {
+				m.setError("mark unread failed", err)
+				return m, nil
+			}
+			_ = m.reload()
 		case "s":
-			m.withSelected(func(item store.Item) { _ = m.app.ToggleStarred(item.ID) })
-			m.reload()
+			if err := m.withSelectedErr(func(item store.Item) error { return m.app.ToggleStarred(item.ID) }); err != nil {
+				m.setError("star failed", err)
+				return m, nil
+			}
+			_ = m.reload()
 		case "a":
-			m.withSelected(func(item store.Item) { _ = m.app.Archive(item.ID) })
-			m.reload()
+			if err := m.withSelectedErr(func(item store.Item) error { return m.app.Archive(item.ID) }); err != nil {
+				m.setError("archive failed", err)
+				return m, nil
+			}
+			_ = m.reload()
 		case "o":
-			m.withSelected(func(item store.Item) { _ = m.app.OpenItem(context.Background(), item.ID) })
+			if err := m.withSelectedErr(func(item store.Item) error { return m.app.OpenItem(m.ctx, item.ID) }); err != nil {
+				m.setError("open URL failed", err)
+			}
 		case "e":
-			m.withSelected(func(item store.Item) { _ = m.app.OpenMarkdown(context.Background(), item.ID) })
+			if err := m.withSelectedErr(func(item store.Item) error { return m.app.OpenMarkdown(m.ctx, item.ID) }); err != nil {
+				m.setError("open Markdown failed", err)
+			}
 		case "m":
 			if m.section != 3 {
 				m.showFrontmatter = !m.showFrontmatter
@@ -250,17 +299,20 @@ func (m Model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 				}
 			}
 		case "tab":
+			m.clearSelection()
 			m.section = (m.section + 1) % len(sections)
 			m.cursor = 0
-			m.reload()
+			_ = m.reload()
 		case "shift+tab":
+			m.clearSelection()
 			m.section = (m.section + len(sections) - 1) % len(sections)
 			m.cursor = 0
-			m.reload()
+			_ = m.reload()
 		case "1", "2", "3", "4", "5", "6":
+			m.clearSelection()
 			m.section = int(key[0] - '1')
 			m.cursor = 0
-			m.reload()
+			_ = m.reload()
 		case "/":
 			m.searchMode = true
 			m.filterMode = false
@@ -273,22 +325,24 @@ func (m Model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 			m.searchMode = false
 			m.filterMode = true
 			m.filter = ""
-			m.reload()
-			m.message = "filter"
+			if err := m.reload(); err == nil {
+				m.message = "filter"
+			}
 		case "F":
 			m.filter = ""
 			m.filterMode = false
-			m.reload()
+			_ = m.reload()
 		case "A":
 			m.showRemoved = !m.showRemoved
-			m.reload()
+			_ = m.reload()
 		case "r":
-			m.reload()
-			m.message = "refreshed"
+			if err := m.reload(); err == nil {
+				m.message = "refreshed"
+			}
 		case "R":
 			m.syncing = true
 			m.message = "syncing..."
-			return m, syncCmd(m.app)
+			return m, syncCmd(m.ctx, m.app)
 		}
 	}
 	return m, nil
@@ -351,6 +405,9 @@ func (m Model) renderTabs(width int) string {
 		parts = append(parts, label)
 	}
 	line := " " + strings.Join(parts, "  ")
+	if selected := len(m.selectedItems); selected > 0 {
+		line += fmt.Sprintf("  selected:%d", selected)
+	}
 	if m.searchMode {
 		line += "  /" + m.search
 	} else if m.filterMode {
@@ -423,7 +480,7 @@ func (m Model) renderList(width, height int) string {
 			end = len(m.items)
 		}
 		for i := start; i < end; i++ {
-			lines = append(lines, m.renderItemRow(m.items[i], i == m.cursor, width))
+			lines = append(lines, m.renderItemRow(m.items[i], i == m.cursor, width, m.itemSelected(m.items[i].ID)))
 		}
 	}
 
@@ -433,7 +490,7 @@ func (m Model) renderList(width, height int) string {
 	return fitLines(lines, width, height, bodyStyle)
 }
 
-func (m Model) renderItemRow(item store.Item, selected bool, width int) string {
+func (m Model) renderItemRow(item store.Item, selected bool, width int, multiSelected ...bool) string {
 	baseStyle := bodyStyle
 	markerStyle := bodyStyle
 	readMarkerStyle := readStyle
@@ -453,6 +510,13 @@ func (m Model) renderItemRow(item store.Item, selected bool, width int) string {
 	if selected {
 		marker = selectedMarker
 	}
+	selection := baseStyle.Render(" ")
+	if len(multiSelected) > 0 && multiSelected[0] {
+		selection = accentStyle.Render(multiSelectMarker)
+		if selected {
+			selection = selectedAccentStyle.Render(multiSelectMarker)
+		}
+	}
 	read := readMarkerStyle.Render(" ")
 	if item.ReadAt == "" {
 		read = unreadMarkerStyle.Render("●")
@@ -467,21 +531,21 @@ func (m Model) renderItemRow(item store.Item, selected bool, width int) string {
 	if metricsText != "" {
 		suffix = " " + metricsText + source
 	}
-	titleWidth := width - 6 - lipgloss.Width(suffix)
+	titleWidth := width - 7 - lipgloss.Width(suffix)
 	if titleWidth < 8 && metricsText != "" {
 		metricsText = ""
 		suffix = source
-		titleWidth = width - 6 - lipgloss.Width(suffix)
+		titleWidth = width - 7 - lipgloss.Width(suffix)
 	}
 	if titleWidth < 8 {
-		titleWidth = width - 6
+		titleWidth = width - 7
 		suffix = ""
 	}
 	if titleWidth < 1 {
 		titleWidth = 1
 	}
 	title := truncateText(item.Title, titleWidth)
-	row := markerStyle.Render(marker) + baseStyle.Render(" ") + read + star + baseStyle.Render(" ") + baseStyle.Render(title) + mutedRowStyle.Render(suffix)
+	row := markerStyle.Render(marker) + baseStyle.Render(" ") + selection + read + star + baseStyle.Render(" ") + baseStyle.Render(title) + mutedRowStyle.Render(suffix)
 	return fillStyled(row, width, baseStyle)
 }
 
@@ -625,9 +689,13 @@ func (m Model) renderStatus(width int) string {
 		parts = append(parts, mutedStyle.Render(m.status.LatestSyncAt))
 	}
 	if m.message != "" {
-		parts = append(parts, accentStyle.Render(m.message))
+		messageStyle := accentStyle
+		if isErrorMessage(m.message) {
+			messageStyle = errorStyle
+		}
+		parts = append(parts, messageStyle.Render(m.message))
 	}
-	parts = append(parts, mutedStyle.Render("? help · m frontmatter · q quit"))
+	parts = append(parts, mutedStyle.Render("? help · v select · m frontmatter · q quit"))
 
 	for len(parts) > 0 {
 		line := renderStatusParts(parts)
@@ -637,6 +705,11 @@ func (m Model) renderStatus(width int) string {
 		parts = parts[:len(parts)-1]
 	}
 	return renderPlainLine(fmt.Sprintf(" ●%d unread · sync %s", m.status.UnreadCount, syncStatus), width, appStyle)
+}
+
+func isErrorMessage(message string) bool {
+	lower := strings.ToLower(message)
+	return strings.Contains(lower, "failed") || strings.Contains(lower, "error")
 }
 
 func renderStatusParts(parts []string) string {
@@ -663,12 +736,12 @@ func (m Model) renderHelp(width, height int) string {
 		renderPlainLine(" Search/filter", width, accentStyle),
 		renderPlainLine("   / search, n/N next/prev, f live filter, F clear, A toggle removed-source items", width, bodyStyle),
 		renderPlainLine(" Items", width, accentStyle),
-		renderPlainLine("   Enter/l open, Space read/unread, u unread, s star, a archive", width, bodyStyle),
+		renderPlainLine("   Enter/l open, v visual select, Space read/unread, u unread, s star, a archive", width, bodyStyle),
 		renderPlainLine("   o open URL, e edit Markdown, m toggle frontmatter", width, bodyStyle),
 		renderPlainLine(" Sync", width, accentStyle),
 		renderPlainLine("   r refresh, R sync all", width, bodyStyle),
 		renderPlainLine(" Other", width, accentStyle),
-		renderPlainLine("   ? help, Esc back/close, q quit", width, bodyStyle),
+		renderPlainLine("   ? help, Esc back/close/cancel selection, q quit", width, bodyStyle),
 	}
 	return fitLines(lines, width, height, appStyle)
 }
@@ -792,12 +865,18 @@ func truncateText(text string, width int) string {
 	return xansi.Truncate(text, width, "…")
 }
 
-func (m *Model) reload() {
+func (m *Model) reload() error {
 	if m.app == nil {
-		return
+		return nil
 	}
 	if m.section == 3 {
-		m.sources, _ = m.app.Sources(true)
+		sources, err := m.app.Sources(true)
+		if err != nil {
+			m.setError("reload failed", err)
+			return err
+		}
+		m.clearSelection()
+		m.sources = sources
 	} else {
 		filter := store.ItemFilter{}
 		switch m.section {
@@ -813,19 +892,30 @@ func (m *Model) reload() {
 		if m.showRemoved && m.section != 4 {
 			filter.AllItems = true
 		}
-		items, _ := m.app.Items(filter)
+		items, err := m.app.Items(filter)
+		if err != nil {
+			m.setError("reload failed", err)
+			return err
+		}
 		if m.filter != "" {
 			items = filterItems(items, m.filter)
 		}
 		m.items = items
+		m.pruneSelection()
 	}
-	m.status, _ = m.app.Status()
+	status, err := m.app.Status()
+	if err != nil {
+		m.setError("reload failed", err)
+		return err
+	}
+	m.status = status
 	if m.cursor >= m.listLen() && m.listLen() > 0 {
 		m.cursor = m.listLen() - 1
 	}
 	if m.cursor < 0 {
 		m.cursor = 0
 	}
+	return nil
 }
 
 func (m *Model) move(delta int) {
@@ -836,6 +926,7 @@ func (m *Model) move(delta int) {
 	if n := m.listLen(); n > 0 && m.cursor >= n {
 		m.cursor = n - 1
 	}
+	m.updateSelectionRange()
 }
 
 func (m Model) listLen() int {
@@ -850,7 +941,7 @@ func (m *Model) closeReader() {
 		return
 	}
 	m.reader = false
-	m.reload()
+	_ = m.reload()
 }
 
 func (m *Model) markSelectedRead() {
@@ -862,10 +953,16 @@ func (m *Model) markSelectedRead() {
 		return
 	}
 	if err := m.app.SetRead(item.ID, true); err != nil {
+		m.setError("mark read failed", err)
 		return
 	}
 	m.items[m.cursor].ReadAt = time.Now().Format(time.RFC3339)
-	m.status, _ = m.app.Status()
+	status, err := m.app.Status()
+	if err != nil {
+		m.setError("reload failed", err)
+		return
+	}
+	m.status = status
 }
 
 func (m Model) withSelected(fn func(store.Item)) {
@@ -873,6 +970,163 @@ func (m Model) withSelected(fn func(store.Item)) {
 		return
 	}
 	fn(m.items[m.cursor])
+}
+
+func (m Model) withSelectedErr(fn func(store.Item) error) error {
+	if m.section == 3 || m.cursor < 0 || m.cursor >= len(m.items) {
+		return nil
+	}
+	return fn(m.items[m.cursor])
+}
+
+func (m *Model) setError(prefix string, err error) {
+	if err == nil {
+		return
+	}
+	m.message = prefix + ": " + err.Error()
+}
+
+func (m *Model) toggleSelection() {
+	if m.section == 3 || m.cursor < 0 || m.cursor >= len(m.items) {
+		return
+	}
+	if m.selecting {
+		m.selecting = false
+		m.selectionAnchor = ""
+		m.setSelectionMessage()
+		return
+	}
+	if m.selectedItems == nil {
+		m.selectedItems = map[string]struct{}{}
+	}
+	m.selectedItems = map[string]struct{}{}
+	m.selecting = true
+	m.selectionAnchor = m.items[m.cursor].ID
+	m.updateSelectionRange()
+	m.setSelectionMessage()
+}
+
+func (m Model) hasSelection() bool {
+	return len(m.selectedItems) > 0
+}
+
+func (m Model) itemSelected(id string) bool {
+	_, ok := m.selectedItems[id]
+	return ok
+}
+
+func (m *Model) clearSelection() {
+	m.selecting = false
+	m.selectionAnchor = ""
+	if len(m.selectedItems) == 0 {
+		return
+	}
+	m.selectedItems = map[string]struct{}{}
+}
+
+func (m *Model) pruneSelection() {
+	if len(m.selectedItems) == 0 {
+		return
+	}
+	visible := make(map[string]struct{}, len(m.items))
+	for _, item := range m.items {
+		visible[item.ID] = struct{}{}
+	}
+	for id := range m.selectedItems {
+		if _, ok := visible[id]; !ok {
+			delete(m.selectedItems, id)
+		}
+	}
+	if len(m.selectedItems) == 0 {
+		m.clearSelection()
+	}
+}
+
+func (m *Model) cancelSelection() {
+	m.clearSelection()
+	m.message = "selection cancelled"
+}
+
+func (m *Model) updateSelectionRange() {
+	if !m.selecting || m.section == 3 || m.cursor < 0 || m.cursor >= len(m.items) {
+		return
+	}
+	anchor := -1
+	for i, item := range m.items {
+		if item.ID == m.selectionAnchor {
+			anchor = i
+			break
+		}
+	}
+	if anchor < 0 {
+		m.clearSelection()
+		return
+	}
+	start, end := anchor, m.cursor
+	if start > end {
+		start, end = end, start
+	}
+	selected := make(map[string]struct{}, end-start+1)
+	for i := start; i <= end; i++ {
+		selected[m.items[i].ID] = struct{}{}
+	}
+	m.selectedItems = selected
+}
+
+func (m Model) selectedVisibleItems() []store.Item {
+	if len(m.selectedItems) == 0 {
+		return nil
+	}
+	items := make([]store.Item, 0, len(m.selectedItems))
+	for _, item := range m.items {
+		if m.itemSelected(item.ID) {
+			items = append(items, item)
+		}
+	}
+	return items
+}
+
+func (m *Model) batchToggleRead() {
+	items := m.selectedVisibleItems()
+	if m.app == nil || len(items) == 0 {
+		return
+	}
+	markRead := false
+	for _, item := range items {
+		if item.ReadAt == "" {
+			markRead = true
+			break
+		}
+	}
+	m.batchSetReadForItems(items, markRead)
+}
+
+func (m *Model) batchSetRead(read bool) {
+	items := m.selectedVisibleItems()
+	if m.app == nil || len(items) == 0 {
+		return
+	}
+	m.batchSetReadForItems(items, read)
+}
+
+func (m *Model) batchSetReadForItems(items []store.Item, read bool) {
+	for _, item := range items {
+		_ = m.app.SetRead(item.ID, read)
+	}
+	m.clearSelection()
+	if read {
+		m.message = fmt.Sprintf("%d marked read", len(items))
+	} else {
+		m.message = fmt.Sprintf("%d marked unread", len(items))
+	}
+}
+
+func (m *Model) setSelectionMessage() {
+	if len(m.selectedItems) == 0 {
+		m.message = "selection cleared"
+		return
+	}
+	m.message = fmt.Sprintf("%d selected", len(m.selectedItems))
 }
 
 func (m *Model) findNext(dir int) {
@@ -968,17 +1222,44 @@ func (m *Model) dueSources(now time.Time) []string {
 	return due
 }
 
-func syncCmd(a *app.App) tea.Cmd {
-	return syncSourcesCmd(a, []string{""})
+func syncCmd(ctx context.Context, a *app.App) tea.Cmd {
+	return syncSourcesCmd(ctx, a, []string{""})
 }
 
-func syncSourcesCmd(a *app.App, sourceIDs []string) tea.Cmd {
-	return func() tea.Msg {
-		for _, sourceID := range sourceIDs {
-			_ = a.Sync(context.Background(), sourceID)
-		}
-		return syncMsg{result: true}
+func syncSourcesCmd(ctx context.Context, a *app.App, sourceIDs []string) tea.Cmd {
+	if ctx == nil {
+		ctx = context.Background()
 	}
+	return func() tea.Msg {
+		results := make([]feedSync.Result, 0, len(sourceIDs))
+		for _, sourceID := range sourceIDs {
+			results = append(results, a.Sync(ctx, sourceID))
+		}
+		return syncMsg{results: results}
+	}
+}
+
+func (m syncMsg) ok() bool {
+	for _, result := range m.results {
+		if !result.OK {
+			return false
+		}
+	}
+	return true
+}
+
+func (m syncMsg) errorText() string {
+	var parts []string
+	for _, result := range m.results {
+		parts = append(parts, result.Errors...)
+		for _, source := range result.Sources {
+			parts = append(parts, source.Errors...)
+		}
+	}
+	if len(parts) == 0 {
+		return "unknown error"
+	}
+	return strings.Join(parts, "; ")
 }
 
 func tickCmd(d time.Duration) tea.Cmd {

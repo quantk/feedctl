@@ -2,11 +2,15 @@ package tui
 
 import (
 	"context"
+	"net/http"
+	"net/http/httptest"
+	"path/filepath"
 	"regexp"
 	"strings"
 	"testing"
 
 	"feedctl/internal/app"
+	"feedctl/internal/config"
 	"feedctl/internal/metrics"
 	"feedctl/internal/store"
 	"feedctl/internal/testutil"
@@ -82,6 +86,75 @@ func TestTUIKeybindingsAndItemActions(t *testing.T) {
 	}
 }
 
+func TestTUIManualSyncFailureIsVisible(t *testing.T) {
+	m, closeApp := newFailingSyncModel(t)
+	defer closeApp()
+
+	model, cmd := m.Update(tea.KeyMsg{Type: tea.KeyRunes, Runes: []rune("R")})
+	m = model.(Model)
+	if cmd == nil {
+		t.Fatal("manual sync did not return command")
+	}
+	model, _ = m.Update(cmd())
+	m = model.(Model)
+	if !strings.Contains(m.message, "sync failed") {
+		t.Fatalf("message=%q want visible sync failure", m.message)
+	}
+	if m.syncing {
+		t.Fatal("syncing should be false after failed sync result")
+	}
+}
+
+func TestTUIPeriodicSyncFailureIsVisible(t *testing.T) {
+	m, closeApp := newFailingSyncModel(t)
+	defer closeApp()
+
+	model, _ := m.Update(syncSourcesCmd(m.ctx, m.app, []string{"bad"})())
+	m = model.(Model)
+	if !strings.Contains(m.message, "sync failed") {
+		t.Fatalf("message=%q want visible periodic sync failure", m.message)
+	}
+}
+
+func TestTUIReloadFailureIsVisibleAndKeepsPreviousState(t *testing.T) {
+	m := newTUITestModel(t, "Body")
+	if len(m.items) != 1 {
+		t.Fatalf("items=%d want 1", len(m.items))
+	}
+	if err := m.app.Close(); err != nil {
+		t.Fatal(err)
+	}
+
+	m = updateKey(t, m, "r")
+	if !strings.Contains(m.message, "reload failed") {
+		t.Fatalf("message=%q want reload failure", m.message)
+	}
+	if len(m.items) != 1 {
+		t.Fatalf("reload failure should keep previous items, got %d", len(m.items))
+	}
+}
+
+func TestTUIItemActionFailureIsVisible(t *testing.T) {
+	testutil.IsolatedEnv(t)
+	a, err := app.Open(context.Background())
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer a.Close()
+	if err := a.Store.UpsertConfiguredSource(config.Source{ID: "example", Type: config.SourceTypeRSS, Name: "Example", URL: "https://example.com/feed.xml", Enabled: true}); err != nil {
+		t.Fatal(err)
+	}
+	if err := a.Store.CreateItem(store.Item{ID: "no-url", SourceID: "example", SourceItemID: "guid-1", IdentityKind: "guid", Title: "No URL", ContentPath: "example/no-url.md", ContentHash: "sha256:no-url", Version: 1}); err != nil {
+		t.Fatal(err)
+	}
+
+	m := NewModel(a)
+	m = updateKey(t, m, "o")
+	if !strings.Contains(m.message, "item has no URL") {
+		t.Fatalf("message=%q want item action error", m.message)
+	}
+}
+
 func TestTUIEnterMarksItemRead(t *testing.T) {
 	testutil.IsolatedEnv(t)
 	feed := testutil.RSSFeed("Example", testutil.DefaultItem("guid-1", "First", "Body"), testutil.DefaultItem("guid-2", "Second", "Body"))
@@ -126,6 +199,138 @@ func TestTUIEnterMarksItemRead(t *testing.T) {
 	}
 	if second.ReadAt != "" {
 		t.Fatal("l should open without marking read")
+	}
+}
+
+func TestTUIMultiSelectBatchTogglesReadState(t *testing.T) {
+	testutil.IsolatedEnv(t)
+	feed := testutil.RSSFeed("Example",
+		testutil.DefaultItem("guid-1", "First", "Body"),
+		testutil.DefaultItem("guid-2", "Second", "Body"),
+		testutil.DefaultItem("guid-3", "Third", "Body"),
+	)
+	server := testutil.FeedServer(t, &feed)
+	defer server.Close()
+	if _, err := app.AddRSS(context.Background(), server.URL, app.AddRSSParams{ID: "example", Name: "Example"}); err != nil {
+		t.Fatal(err)
+	}
+	a, err := app.Open(context.Background())
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer a.Close()
+	res := a.Sync(context.Background(), "")
+	if !res.OK {
+		t.Fatalf("sync: %#v", res)
+	}
+
+	m := NewModel(a)
+	if len(m.items) != 3 {
+		t.Fatalf("items=%d", len(m.items))
+	}
+	firstID := m.items[0].ID
+	secondID := m.items[1].ID
+	thirdID := m.items[2].ID
+
+	m = updateKey(t, m, "v")
+	m = updateKey(t, m, "j")
+	if got := len(m.selectedItems); got != 2 {
+		t.Fatalf("selected items=%d want 2", got)
+	}
+	if !strings.Contains(visibleText(m.renderList(80, 8)), "✓") {
+		t.Fatalf("selected rows do not show check marker:\n%s", visibleText(m.renderList(80, 8)))
+	}
+
+	m = updateKey(t, m, " ")
+	if got := len(m.selectedItems); got != 0 {
+		t.Fatalf("selected items after batch read=%d want 0", got)
+	}
+	assertTUIReadState(t, a, firstID, true)
+	assertTUIReadState(t, a, secondID, true)
+	assertTUIReadState(t, a, thirdID, false)
+
+	m = updateKey(t, m, "g")
+	m = updateKey(t, m, "v")
+	m = updateKey(t, m, "j")
+	m = updateKey(t, m, "u")
+	assertTUIReadState(t, a, firstID, false)
+	assertTUIReadState(t, a, secondID, false)
+	assertTUIReadState(t, a, thirdID, false)
+
+	m = updateKey(t, m, "g")
+	m = updateKey(t, m, "v")
+	m = updateKey(t, m, "j")
+	m = updateKey(t, m, " ")
+	assertTUIReadState(t, a, firstID, true)
+	assertTUIReadState(t, a, secondID, true)
+	assertTUIReadState(t, a, thirdID, false)
+
+	m = updateKey(t, m, "g")
+	m = updateKey(t, m, "v")
+	m = updateKey(t, m, "j")
+	m = updateKey(t, m, " ")
+	assertTUIReadState(t, a, firstID, false)
+	assertTUIReadState(t, a, secondID, false)
+	assertTUIReadState(t, a, thirdID, false)
+}
+
+func TestTUIVisualSelectionExtendsWithMovementAndEscCancels(t *testing.T) {
+	testutil.IsolatedEnv(t)
+	feed := testutil.RSSFeed("Example",
+		testutil.DefaultItem("guid-1", "First", "Body"),
+		testutil.DefaultItem("guid-2", "Second", "Body"),
+		testutil.DefaultItem("guid-3", "Third", "Body"),
+	)
+	server := testutil.FeedServer(t, &feed)
+	defer server.Close()
+	if _, err := app.AddRSS(context.Background(), server.URL, app.AddRSSParams{ID: "example", Name: "Example"}); err != nil {
+		t.Fatal(err)
+	}
+	a, err := app.Open(context.Background())
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer a.Close()
+	res := a.Sync(context.Background(), "")
+	if !res.OK {
+		t.Fatalf("sync: %#v", res)
+	}
+
+	m := NewModel(a)
+	m = updateKey(t, m, "j")
+	anchorID := m.items[m.cursor].ID
+	m = updateKey(t, m, "v")
+	if !m.selecting || m.selectionAnchor != anchorID || len(m.selectedItems) != 1 {
+		t.Fatalf("selection not started: selecting=%v anchor=%q selected=%v", m.selecting, m.selectionAnchor, m.selectedItems)
+	}
+
+	m = updateKey(t, m, "j")
+	if got := len(m.selectedItems); got != 2 {
+		t.Fatalf("selected after moving down=%d want 2", got)
+	}
+	if !m.itemSelected(anchorID) || !m.itemSelected(m.items[m.cursor].ID) {
+		t.Fatalf("selection does not include anchor/current: anchor=%s cursor=%s selected=%v", anchorID, m.items[m.cursor].ID, m.selectedItems)
+	}
+
+	m = updateKey(t, m, "k")
+	if got := len(m.selectedItems); got != 1 {
+		t.Fatalf("selected after moving back to anchor=%d want 1", got)
+	}
+	if !m.itemSelected(anchorID) {
+		t.Fatalf("anchor not selected after moving back: selected=%v", m.selectedItems)
+	}
+
+	m = updateKey(t, m, "k")
+	if got := len(m.selectedItems); got != 2 {
+		t.Fatalf("selected after moving up=%d want 2", got)
+	}
+	if !m.itemSelected(anchorID) || !m.itemSelected(m.items[m.cursor].ID) {
+		t.Fatalf("upward selection missing anchor/current: anchor=%s cursor=%s selected=%v", anchorID, m.items[m.cursor].ID, m.selectedItems)
+	}
+
+	m = updateKey(t, m, "esc")
+	if m.selecting || m.selectionAnchor != "" || len(m.selectedItems) != 0 {
+		t.Fatalf("esc did not cancel selection: selecting=%v anchor=%q selected=%v", m.selecting, m.selectionAnchor, m.selectedItems)
 	}
 }
 
@@ -337,6 +542,14 @@ func TestTUIPreviewRendersMarkdown(t *testing.T) {
 	}
 }
 
+func TestTUIErrorMessageUsesErrorStyle(t *testing.T) {
+	m := Model{message: "sync failed: boom"}
+	rendered := m.renderStatus(120)
+	if !strings.Contains(rendered, errorStyle.Render(m.message)) {
+		t.Fatalf("status did not render error message with error style:\n%s", rendered)
+	}
+}
+
 func TestTUIWindowSizeAndFullHeightRender(t *testing.T) {
 	m := NewModel(nil)
 	m = updateWindowSize(t, m, 72, 16)
@@ -397,6 +610,17 @@ func TestTUISelectionMarkerUsesVerticalBar(t *testing.T) {
 	}
 }
 
+func assertTUIReadState(t *testing.T, a *app.App, itemID string, wantRead bool) {
+	t.Helper()
+	item, err := a.Item(itemID)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if gotRead := item.ReadAt != ""; gotRead != wantRead {
+		t.Fatalf("item %s read=%v want %v", itemID, gotRead, wantRead)
+	}
+}
+
 func updateKey(t *testing.T, m Model, key string) Model {
 	t.Helper()
 	msg := tea.KeyMsg{Type: tea.KeyRunes, Runes: []rune(key)}
@@ -414,6 +638,27 @@ func updateKey(t *testing.T, m Model, key string) Model {
 	}
 	model, _ := m.Update(msg)
 	return model.(Model)
+}
+
+func newFailingSyncModel(t *testing.T) (Model, func()) {
+	t.Helper()
+	configDir, _ := testutil.IsolatedEnv(t)
+	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		_, _ = w.Write([]byte("not a feed"))
+	}))
+	if err := config.WriteSource(filepath.Join(configDir, "sources.d", "bad.toml"), config.Source{ID: "bad", Type: config.SourceTypeRSS, Name: "Bad", URL: server.URL, Enabled: true, Interval: "5m"}); err != nil {
+		server.Close()
+		t.Fatal(err)
+	}
+	a, err := app.Open(context.Background())
+	if err != nil {
+		server.Close()
+		t.Fatal(err)
+	}
+	return NewModel(a), func() {
+		_ = a.Close()
+		server.Close()
+	}
 }
 
 func newTUITestModel(t *testing.T, body string) Model {

@@ -308,6 +308,38 @@ func TestAppSourceItemStatusAndStorageOperations(t *testing.T) {
 	}
 }
 
+func TestAppOpenActionsRespectCancelledContext(t *testing.T) {
+	_, _ = testutil.IsolatedEnv(t)
+	feed := testutil.RSSFeed("Example", testutil.DefaultItem("guid-1", "First", "Body"))
+	server := testutil.FeedServer(t, &feed)
+	defer server.Close()
+	if _, err := app.AddRSS(context.Background(), server.URL, app.AddRSSParams{ID: "example", Name: "Example"}); err != nil {
+		t.Fatal(err)
+	}
+	a, err := app.Open(context.Background())
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer a.Close()
+	res := a.Sync(context.Background(), "")
+	if !res.OK {
+		t.Fatalf("sync: %#v", res)
+	}
+	items, err := a.Items(store.ItemFilter{})
+	if err != nil || len(items) != 1 {
+		t.Fatalf("items len=%d err=%v", len(items), err)
+	}
+
+	ctx, cancel := context.WithCancel(context.Background())
+	cancel()
+	if err := a.OpenItem(ctx, items[0].ID); !errors.Is(err, context.Canceled) {
+		t.Fatalf("OpenItem cancelled error=%v want context.Canceled", err)
+	}
+	if err := a.OpenMarkdown(ctx, items[0].ID); !errors.Is(err, context.Canceled) {
+		t.Fatalf("OpenMarkdown cancelled error=%v want context.Canceled", err)
+	}
+}
+
 func TestAppErrorFormatting(t *testing.T) {
 	inner := errors.New("inner")
 	withMessage := app.AppError("code", "message", inner)

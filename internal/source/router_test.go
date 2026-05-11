@@ -51,6 +51,26 @@ func TestAdapterRouterDispatchesBySourceType(t *testing.T) {
 	}
 }
 
+func TestAdapterRouterFactoryCreatesAdapterPerCall(t *testing.T) {
+	created := 0
+	router := NewAdapterRouterFactories(map[string]AdapterFactory{
+		config.SourceTypeRSS: func() Adapter {
+			created++
+			return &recordingAdapter{name: "rss"}
+		},
+	})
+
+	if _, err := router.Fetch(context.Background(), config.Source{Type: config.SourceTypeRSS, URL: "https://example.com/one.xml"}); err != nil {
+		t.Fatalf("fetch: %v", err)
+	}
+	if _, err := router.Test(context.Background(), config.Source{Type: config.SourceTypeRSS, URL: "https://example.com/two.xml"}); err != nil {
+		t.Fatalf("test: %v", err)
+	}
+	if created != 2 {
+		t.Fatalf("adapters created=%d want 2", created)
+	}
+}
+
 func TestAdapterRouterRejectsUnknownSourceType(t *testing.T) {
 	router := NewAdapterRouter(map[string]Adapter{config.SourceTypeRSS: &recordingAdapter{name: "rss"}})
 

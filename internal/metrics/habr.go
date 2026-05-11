@@ -12,8 +12,9 @@ import (
 )
 
 const (
-	HabrProviderName = "habr"
-	habrBaseURL      = "https://habr.com"
+	HabrProviderName        = "habr"
+	habrBaseURL             = "https://habr.com"
+	defaultHabrFetchTimeout = 5 * time.Second
 )
 
 var habrArticlePathPattern = regexp.MustCompile(`(?:^|/)articles/(\d+)(?:/|$)`)
@@ -21,10 +22,11 @@ var habrArticlePathPattern = regexp.MustCompile(`(?:^|/)articles/(\d+)(?:/|$)`)
 type HabrProvider struct {
 	BaseURL string
 	Client  *http.Client
+	Timeout time.Duration
 }
 
 func NewHabrProvider() HabrProvider {
-	return HabrProvider{BaseURL: habrBaseURL, Client: http.DefaultClient}
+	return HabrProvider{BaseURL: habrBaseURL, Client: http.DefaultClient, Timeout: defaultHabrFetchTimeout}
 }
 
 func (p HabrProvider) Name() string { return HabrProviderName }
@@ -35,6 +37,16 @@ func (p HabrProvider) Match(candidate Candidate) bool {
 }
 
 func (p HabrProvider) Fetch(ctx context.Context, candidate Candidate) (ItemMetrics, error) {
+	if ctx == nil {
+		ctx = context.Background()
+	}
+	timeout := p.Timeout
+	if timeout <= 0 {
+		timeout = defaultHabrFetchTimeout
+	}
+	ctx, cancel := context.WithTimeout(ctx, timeout)
+	defer cancel()
+
 	articleID, ok := habrArticleID(candidate)
 	if !ok {
 		return ItemMetrics{}, fmt.Errorf("habr article id not found")

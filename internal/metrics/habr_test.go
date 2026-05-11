@@ -2,10 +2,12 @@ package metrics
 
 import (
 	"context"
+	"errors"
 	"fmt"
 	"net/http"
 	"net/http/httptest"
 	"testing"
+	"time"
 )
 
 func TestExtractHabrArticleID(t *testing.T) {
@@ -82,6 +84,19 @@ func TestHabrProviderFetchMapsStatistics(t *testing.T) {
 	assertIntPtr(t, "reading", got.ReadingCount, 23)
 	if got.FetchedAt == "" {
 		t.Fatal("FetchedAt is empty")
+	}
+}
+
+func TestHabrProviderFetchUsesTimeout(t *testing.T) {
+	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		<-r.Context().Done()
+	}))
+	defer server.Close()
+
+	provider := HabrProvider{BaseURL: server.URL, Client: server.Client(), Timeout: 10 * time.Millisecond}
+	_, err := provider.Fetch(context.Background(), Candidate{URL: "https://habr.com/ru/articles/1033808/"})
+	if !errors.Is(err, context.DeadlineExceeded) {
+		t.Fatalf("Fetch error=%v want context deadline", err)
 	}
 }
 

@@ -338,6 +338,7 @@ TUI открывается fullscreen, использует Nord-палитру 
 | Live-filter | `f` начать фильтр, `F` очистить |
 | Removed-source items | `A` показать/скрыть |
 | Открыть reader | `Enter` или `l` |
+| Multi-select | `v` начать visual-выделение; `j/k` или стрелки расширяют диапазон; `Esc` отменяет; `Space` batch read/unread; `u` batch unread |
 | Read/unread | `Space`, `u` |
 | Star | `s` |
 | Archive | `a` |

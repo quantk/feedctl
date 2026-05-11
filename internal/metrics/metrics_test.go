@@ -57,6 +57,40 @@ func TestEnricherFetchSelectsFirstMatchingProvider(t *testing.T) {
 	}
 }
 
+func TestEnricherPassesCallerContextToProvider(t *testing.T) {
+	provider := &contextProvider{match: true}
+	enricher := &Enricher{Providers: []Provider{provider}}
+	ctx, cancel := context.WithCancel(context.Background())
+	cancel()
+
+	_, ok, err := enricher.Fetch(ctx, Candidate{URL: "https://example.com"})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if !ok {
+		t.Fatal("provider did not match")
+	}
+	if !errors.Is(provider.ctxErr, context.Canceled) {
+		t.Fatalf("provider ctxErr=%v want context.Canceled", provider.ctxErr)
+	}
+}
+
+type contextProvider struct {
+	match  bool
+	ctxErr error
+}
+
+func (p *contextProvider) Name() string { return "context" }
+func (p *contextProvider) Match(candidate Candidate) bool {
+	_ = candidate
+	return p.match
+}
+func (p *contextProvider) Fetch(ctx context.Context, candidate Candidate) (ItemMetrics, error) {
+	_ = candidate
+	p.ctxErr = ctx.Err()
+	return ItemMetrics{Provider: p.Name(), FetchedAt: "now"}, nil
+}
+
 func TestEnricherFetchNoMatchNilAndError(t *testing.T) {
 	if got, ok, err := (*Enricher)(nil).Fetch(context.Background(), Candidate{}); err != nil || ok || got.Provider != "" {
 		t.Fatalf("nil enricher got=%#v ok=%v err=%v", got, ok, err)

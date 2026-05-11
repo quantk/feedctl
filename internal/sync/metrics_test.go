@@ -112,10 +112,16 @@ func TestSyncMetricsProviderFailureDoesNotFailSync(t *testing.T) {
 	if item.Metrics != nil {
 		t.Fatalf("metrics=%#v want nil", item.Metrics)
 	}
+	version := item.Version
+	hash := item.ContentHash
 
 	res = runner.RunAll(context.Background(), []config.Source{src}, feedSync.Options{})
 	if !res.OK || res.Sources[0].Status != "ok" || res.Sources[0].UnchangedItems != 1 {
 		t.Fatalf("second sync result=%#v", res)
+	}
+	unchanged := onlyMetricsItem(t, st)
+	if unchanged.Version != version || unchanged.ContentHash != hash {
+		t.Fatalf("metrics failure changed content metadata: before version=%d hash=%s after version=%d hash=%s", version, hash, unchanged.Version, unchanged.ContentHash)
 	}
 }
 

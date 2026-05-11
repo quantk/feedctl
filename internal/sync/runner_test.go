@@ -7,13 +7,67 @@ import (
 	"os"
 	"path/filepath"
 	"strings"
+	"sync/atomic"
 	"testing"
+	"time"
 
 	"feedctl/internal/app"
 	"feedctl/internal/config"
 	"feedctl/internal/store"
 	"feedctl/internal/testutil"
 )
+
+func TestRSSSyncConcurrentSourcesRaceRegression(t *testing.T) {
+	configDir, _ := testutil.IsolatedEnv(t)
+	feedOne := testutil.RSSFeed("One", testutil.DefaultItem("guid-1", "First", "Body"))
+	feedTwo := testutil.RSSFeed("Two", testutil.DefaultItem("guid-2", "Second", "Body"))
+	release := make(chan struct{})
+	var requests atomic.Int32
+	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		if requests.Add(1) == 2 {
+			close(release)
+		}
+		select {
+		case <-release:
+		case <-r.Context().Done():
+			return
+		}
+		w.Header().Set("Content-Type", "application/rss+xml")
+		switch r.URL.Path {
+		case "/one":
+			_, _ = w.Write([]byte(feedOne))
+		case "/two":
+			_, _ = w.Write([]byte(feedTwo))
+		default:
+			http.NotFound(w, r)
+		}
+	}))
+	defer server.Close()
+
+	if err := config.WriteSource(filepath.Join(configDir, "sources.d", "one.toml"), config.Source{ID: "one", Type: config.SourceTypeRSS, Name: "One", URL: server.URL + "/one", Enabled: true, Interval: "5m"}); err != nil {
+		t.Fatal(err)
+	}
+	if err := config.WriteSource(filepath.Join(configDir, "sources.d", "two.toml"), config.Source{ID: "two", Type: config.SourceTypeRSS, Name: "Two", URL: server.URL + "/two", Enabled: true, Interval: "5m"}); err != nil {
+		t.Fatal(err)
+	}
+	a, err := app.Open(context.Background())
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer a.Close()
+
+	ctx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
+	defer cancel()
+	res := a.Sync(ctx, "")
+	if !res.OK || len(res.Sources) != 2 {
+		t.Fatalf("concurrent rss sync failed: %#v", res)
+	}
+	for _, src := range res.Sources {
+		if src.Status != "ok" || src.NewItems != 1 {
+			t.Fatalf("unexpected source result: %#v", res.Sources)
+		}
+	}
+}
 
 func TestTelegramSyncCreatesMarkdownAndDoesNotDuplicate(t *testing.T) {
 	configDir, _ := testutil.IsolatedEnv(t)

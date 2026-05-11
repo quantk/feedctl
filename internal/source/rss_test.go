@@ -2,6 +2,7 @@ package source
 
 import (
 	"context"
+	"errors"
 	"net/http"
 	"net/http/httptest"
 	"strings"
@@ -70,6 +71,20 @@ func TestRSSAdapterFetchTestAndNormalizeItems(t *testing.T) {
 	}
 	if meta.Title != feed.Metadata.Title || meta.ItemsFound != 2 {
 		t.Fatalf("test metadata=%#v", meta)
+	}
+}
+
+func TestRSSAdapterFetchRespectsContextCancellation(t *testing.T) {
+	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		<-r.Context().Done()
+	}))
+	defer server.Close()
+
+	ctx, cancel := context.WithTimeout(context.Background(), 10*time.Millisecond)
+	defer cancel()
+	_, err := NewRSSAdapter().Fetch(ctx, config.Source{ID: "slow", Type: config.SourceTypeRSS, URL: server.URL})
+	if !errors.Is(err, context.DeadlineExceeded) {
+		t.Fatalf("Fetch error=%v want context deadline", err)
 	}
 }
 

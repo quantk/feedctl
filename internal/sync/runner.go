@@ -181,6 +181,7 @@ func (r *Runner) processItemClassified(ctx context.Context, src config.Source, i
 			FetchedAt: fetched.Format(time.RFC3339), LastSeenAt: fetched.Format(time.RFC3339), ContentPath: rel,
 			ContentHash: hash, Version: 1, Tags: item.Tags,
 		}); err != nil {
+			_ = os.Remove(filepath.Join(r.Paths.ContentDir, rel))
 			return "", err
 		}
 		r.enrichItemMetrics(ctx, src, itemID, item)
@@ -207,9 +208,7 @@ func (r *Runner) processItemClassified(ctx context.Context, src config.Source, i
 	if _, _, err := content.SafeWrite(r.Paths.ContentDir, existing.ContentPath, r.Paths.TmpDir, rendered); err != nil {
 		return "", fmt.Errorf("rewrite markdown for %s: %w", existing.ID, err)
 	}
-	if err := r.Store.AddItemVersion(store.ItemVersion{ID: existing.ID + fmt.Sprintf("_v%d", existing.Version), ItemID: existing.ID, Version: existing.Version, ContentPath: versionRel, ContentHash: existing.ContentHash, CreatedAt: fetched.Format(time.RFC3339), SizeBytes: versionSize}); err != nil {
-		return "", err
-	}
+	version := store.ItemVersion{ID: existing.ID + fmt.Sprintf("_v%d", existing.Version), ItemID: existing.ID, Version: existing.Version, ContentPath: versionRel, ContentHash: existing.ContentHash, CreatedAt: fetched.Format(time.RFC3339), SizeBytes: versionSize}
 	existing.Title = item.Title
 	existing.URL = item.URL
 	existing.CanonicalURL = item.CanonicalURL
@@ -220,11 +219,20 @@ func (r *Runner) processItemClassified(ctx context.Context, src config.Source, i
 	existing.Version = newVersion
 	existing.UpdatedAt = fetched.Format(time.RFC3339)
 	existing.Tags = item.Tags
-	if err := r.Store.UpdateItemChanged(existing); err != nil {
+	if err := r.Store.AddItemVersionAndUpdateItemChanged(version, existing); err != nil {
+		r.restoreCurrentFromVersion(existing.ContentPath, versionRel)
 		return "", err
 	}
 	r.enrichItemMetrics(ctx, src, existing.ID, item)
 	return "updated", nil
+}
+
+func (r *Runner) restoreCurrentFromVersion(currentRel, versionRel string) {
+	b, err := os.ReadFile(filepath.Join(r.Paths.VersionsDir, versionRel))
+	if err != nil {
+		return
+	}
+	_, _, _ = content.SafeWrite(r.Paths.ContentDir, currentRel, r.Paths.TmpDir, b)
 }
 
 func (r *Runner) enrichItemMetrics(ctx context.Context, src config.Source, itemID string, item source.Item) {

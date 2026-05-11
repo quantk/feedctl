@@ -7,22 +7,33 @@ import (
 	"feedctl/internal/config"
 )
 
+type AdapterFactory func() Adapter
+
 type AdapterRouter struct {
-	adapters map[string]Adapter
+	factories map[string]AdapterFactory
 }
 
 func NewAdapterRouter(adapters map[string]Adapter) *AdapterRouter {
-	copied := make(map[string]Adapter, len(adapters))
+	factories := make(map[string]AdapterFactory, len(adapters))
 	for sourceType, adapter := range adapters {
-		copied[sourceType] = adapter
+		adapter := adapter
+		factories[sourceType] = func() Adapter { return adapter }
 	}
-	return &AdapterRouter{adapters: copied}
+	return NewAdapterRouterFactories(factories)
+}
+
+func NewAdapterRouterFactories(factories map[string]AdapterFactory) *AdapterRouter {
+	copied := make(map[string]AdapterFactory, len(factories))
+	for sourceType, factory := range factories {
+		copied[sourceType] = factory
+	}
+	return &AdapterRouter{factories: copied}
 }
 
 func NewDefaultAdapter() *AdapterRouter {
-	return NewAdapterRouter(map[string]Adapter{
-		config.SourceTypeRSS:      NewRSSAdapter(),
-		config.SourceTypeTelegram: NewTelegramAdapter(),
+	return NewAdapterRouterFactories(map[string]AdapterFactory{
+		config.SourceTypeRSS:      func() Adapter { return NewRSSAdapter() },
+		config.SourceTypeTelegram: func() Adapter { return NewTelegramAdapter() },
 	})
 }
 
@@ -46,7 +57,11 @@ func (r *AdapterRouter) adapter(sourceType string) (Adapter, error) {
 	if r == nil {
 		return nil, fmt.Errorf("unsupported source type %q: no adapter router configured", sourceType)
 	}
-	adapter := r.adapters[sourceType]
+	factory := r.factories[sourceType]
+	if factory == nil {
+		return nil, fmt.Errorf("unsupported source type %q", sourceType)
+	}
+	adapter := factory()
 	if adapter == nil {
 		return nil, fmt.Errorf("unsupported source type %q", sourceType)
 	}

@@ -325,7 +325,12 @@ func (a *App) MarkdownPath(id string) (string, error) {
 }
 
 func (a *App) OpenItem(ctx context.Context, id string) error {
-	_ = ctx
+	if ctx == nil {
+		ctx = context.Background()
+	}
+	if err := ctx.Err(); err != nil {
+		return err
+	}
 	item, err := a.Item(id)
 	if err != nil {
 		return err
@@ -333,17 +338,22 @@ func (a *App) OpenItem(ctx context.Context, id string) error {
 	if item.URL == "" {
 		return AppError("item-url-missing", "item has no URL", nil)
 	}
-	cmd := exec.Command(a.Loaded.Config.TUI.Browser, item.URL)
+	cmd := exec.CommandContext(ctx, a.Loaded.Config.TUI.Browser, item.URL)
 	return cmd.Start()
 }
 
 func (a *App) OpenMarkdown(ctx context.Context, id string) error {
-	_ = ctx
+	if ctx == nil {
+		ctx = context.Background()
+	}
+	if err := ctx.Err(); err != nil {
+		return err
+	}
 	path, err := a.MarkdownPath(id)
 	if err != nil {
 		return err
 	}
-	cmd := exec.Command(a.Loaded.Config.TUI.Editor, path)
+	cmd := exec.CommandContext(ctx, a.Loaded.Config.TUI.Editor, path)
 	return cmd.Start()
 }
 

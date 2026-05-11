@@ -122,6 +122,29 @@ The TUI SHALL allow users to read items and perform item actions from the keyboa
 - **WHEN** the user selects an item and presses `u`
 - **THEN** the TUI marks the item unread and persists the change in SQLite
 
+#### Scenario: Start multi-select range selection
+- **WHEN** the user selects an item in an item section and presses `v`
+- **THEN** the TUI starts a transient multi-select range anchored at that item
+- **AND** selected items are visually marked in the item list
+
+#### Scenario: Extend multi-select range with movement
+- **WHEN** multi-select range selection is active and the user moves up or down
+- **THEN** the TUI updates the selected item range between the anchor item and the current cursor item
+
+#### Scenario: Cancel multi-select range selection
+- **WHEN** multi-select range selection or selected items are active and the user presses `Esc`
+- **THEN** the TUI clears the transient selection without changing item read state
+
+#### Scenario: Batch toggle read state for selected items
+- **WHEN** the user has selected multiple items with `v` and presses `Space`
+- **THEN** the TUI marks all selected items read when any selected item is unread, or marks all selected items unread when all selected items are already read
+- **AND** the TUI persists every changed read state in SQLite
+- **AND** the TUI clears the transient multi-selection after the batch action
+
+#### Scenario: Batch mark selected items unread
+- **WHEN** the user has selected multiple items with `v` and presses `u`
+- **THEN** the TUI marks all selected items unread, persists every changed read state in SQLite, and clears the transient multi-selection
+
 #### Scenario: Toggle starred state
 - **WHEN** the user selects an item and presses `s`
 - **THEN** the TUI toggles the item's starred state and persists the change in SQLite
@@ -290,4 +313,35 @@ The TUI SHALL display available item metrics in item list rows and selected item
 #### Scenario: Selected item details include metrics
 - **WHEN** the selected item has stored metrics
 - **THEN** the preview or details pane includes the available metrics such as score, comments, votes, and reading count
+
+### Requirement: TUI operation errors are visible
+The TUI SHALL surface errors from sync, reload, and selected item actions in the interface instead of silently ignoring them or reporting success.
+
+#### Scenario: Manual sync failure is shown
+- **WHEN** the user presses `R` and one or more selected sources fail to sync
+- **THEN** the TUI displays a failed sync status or error message
+- **AND** the TUI remains usable for navigation and item reading
+
+#### Scenario: Periodic sync failure is shown
+- **WHEN** periodic sync runs and a due source fails
+- **THEN** the TUI displays a failed sync status or error message instead of `sync ok`
+- **AND** other views remain usable
+
+#### Scenario: Reload failure is shown
+- **WHEN** the TUI cannot reload items, sources, or status from runtime storage
+- **THEN** the TUI displays a concise error message
+- **AND** keeps the previous usable model state where practical
+
+#### Scenario: Item action failure is shown
+- **WHEN** the user triggers an item action such as open URL, open Markdown, toggle read, star, or archive and the action fails
+- **THEN** the TUI displays a concise action error message
+- **AND** does not update the visible item state as though the action succeeded
+
+### Requirement: TUI sync commands preserve cancellation context
+The TUI SHALL pass its active command context to background sync work instead of using a detached background context.
+
+#### Scenario: TUI exits during background sync
+- **WHEN** the TUI is shutting down while a background sync command is running
+- **THEN** the sync work receives context cancellation where supported
+- **AND** the TUI does not report the cancelled sync as successful after shutdown begins
 
