@@ -2,6 +2,7 @@ package app_test
 
 import (
 	"context"
+	"errors"
 	"os"
 	"path/filepath"
 	"strings"
@@ -159,6 +160,170 @@ func TestSourceLifecycleRemoveAndReappear(t *testing.T) {
 	}
 	if s.Lifecycle != "disabled" {
 		t.Fatalf("reappeared lifecycle=%s", s.Lifecycle)
+	}
+}
+
+func TestAppSourceItemStatusAndStorageOperations(t *testing.T) {
+	_, _ = testutil.IsolatedEnv(t)
+	feed := testutil.RSSFeed("Example", testutil.DefaultItem("guid-1", "First", "Body"))
+	server := testutil.FeedServer(t, &feed)
+	defer server.Close()
+	if _, err := app.AddRSS(context.Background(), server.URL, app.AddRSSParams{ID: "example", Name: "Example"}); err != nil {
+		t.Fatal(err)
+	}
+
+	loaded, err := app.LoadOnly()
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(loaded.Sources) != 1 || loaded.Sources[0].ID != "example" {
+		t.Fatalf("loaded sources=%#v", loaded.Sources)
+	}
+
+	a, err := app.Open(context.Background())
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer a.Close()
+
+	sources, err := a.Sources(false)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(sources) != 1 || sources[0].ID != "example" || sources[0].Lifecycle != "active" {
+		t.Fatalf("sources=%#v", sources)
+	}
+	metadata, err := a.TestSource(context.Background(), "example")
+	if err != nil {
+		t.Fatal(err)
+	}
+	if metadata.Title != "Example" || metadata.ItemsFound != 1 {
+		t.Fatalf("metadata=%#v", metadata)
+	}
+
+	dryDisabled, err := a.SetSourceEnabled("example", false, true)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if dryDisabled.Enabled {
+		t.Fatalf("dry disabled source=%#v", dryDisabled)
+	}
+	stillActive, err := a.Source("example")
+	if err != nil {
+		t.Fatal(err)
+	}
+	if stillActive.Lifecycle != "active" {
+		t.Fatalf("dry-run changed source lifecycle: %#v", stillActive)
+	}
+	if _, err := a.SetSourceEnabled("example", false, false); err != nil {
+		t.Fatal(err)
+	}
+	disabled, err := a.Source("example")
+	if err != nil {
+		t.Fatal(err)
+	}
+	if disabled.Lifecycle != "disabled" || disabled.Enabled {
+		t.Fatalf("disabled source=%#v", disabled)
+	}
+	if _, err := a.SetSourceEnabled("example", true, false); err != nil {
+		t.Fatal(err)
+	}
+
+	syncRes := a.Sync(context.Background(), "example")
+	if !syncRes.OK || len(syncRes.Sources) != 1 || syncRes.Sources[0].NewItems != 1 {
+		t.Fatalf("sync result=%#v", syncRes)
+	}
+	items, err := a.Items(store.ItemFilter{})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(items) != 1 {
+		t.Fatalf("items=%#v", items)
+	}
+	itemID := items[0].ID
+
+	if err := a.ToggleRead(itemID); err != nil {
+		t.Fatal(err)
+	}
+	readItem, err := a.Item(itemID)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if readItem.ReadAt == "" {
+		t.Fatalf("item not marked read: %#v", readItem)
+	}
+	if err := a.ToggleRead(itemID); err != nil {
+		t.Fatal(err)
+	}
+	readItem, err = a.Item(itemID)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if readItem.ReadAt != "" {
+		t.Fatalf("item not marked unread: %#v", readItem)
+	}
+	if err := a.SetStarred(itemID, true); err != nil {
+		t.Fatal(err)
+	}
+	starred, err := a.Item(itemID)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if !starred.Starred {
+		t.Fatalf("item not starred: %#v", starred)
+	}
+
+	status, err := a.Status()
+	if err != nil {
+		t.Fatal(err)
+	}
+	if status.SourceCount != 1 || status.UnreadCount != 1 || status.LatestSyncStatus != "ok" {
+		t.Fatalf("status=%#v", status)
+	}
+
+	mdPath, err := a.MarkdownPath(itemID)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if err := os.Remove(mdPath); err != nil {
+		t.Fatal(err)
+	}
+	orphanPath := filepath.Join(a.Loaded.Paths.ContentDir, "orphan.md")
+	if err := os.WriteFile(orphanPath, []byte("orphan"), 0o644); err != nil {
+		t.Fatal(err)
+	}
+	reconciled, err := a.ReconcileStorage()
+	if err != nil {
+		t.Fatal(err)
+	}
+	if reconciled.ScannedFiles != 1 || len(reconciled.MissingFiles) != 1 || reconciled.MissingFiles[0] != items[0].ContentPath || len(reconciled.OrphanedFiles) != 1 || reconciled.OrphanedFiles[0] != "orphan.md" {
+		t.Fatalf("reconciled=%#v", reconciled)
+	}
+
+	if err := a.Store.CreateItem(store.Item{ID: "no-url", SourceID: "example", SourceItemID: "no-url", IdentityKind: "guid", Title: "No URL", ContentPath: "example/no-url.md", ContentHash: "sha256:no-url", Version: 1}); err != nil {
+		t.Fatal(err)
+	}
+	if err := a.OpenItem(context.Background(), "no-url"); err == nil || !strings.Contains(err.Error(), "item has no URL") {
+		t.Fatalf("OpenItem no-url error=%v", err)
+	}
+}
+
+func TestAppErrorFormatting(t *testing.T) {
+	inner := errors.New("inner")
+	withMessage := app.AppError("code", "message", inner)
+	if got := withMessage.Error(); got != "message" {
+		t.Fatalf("Error with message=%q", got)
+	}
+	if !errors.Is(withMessage, inner) {
+		t.Fatalf("AppError should unwrap inner error")
+	}
+	withoutMessage := app.AppError("code", "", inner)
+	if got := withoutMessage.Error(); got != "inner" {
+		t.Fatalf("Error without message=%q", got)
+	}
+	codeOnly := app.AppError("code", "", nil)
+	if got := codeOnly.Error(); got != "code" {
+		t.Fatalf("Error code only=%q", got)
 	}
 }
 

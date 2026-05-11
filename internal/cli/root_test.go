@@ -3,9 +3,12 @@ package cli
 import (
 	"bytes"
 	"context"
+	"errors"
 	"strings"
 	"testing"
 
+	"feedctl/internal/app"
+	"feedctl/internal/config"
 	"feedctl/internal/testutil"
 )
 
@@ -144,6 +147,151 @@ func TestCLIAddTelegram(t *testing.T) {
 	}
 }
 
+func TestCLISyncItemsStorageStatusAndConfigFormat(t *testing.T) {
+	testutil.IsolatedEnv(t)
+	feed := testutil.RSSFeed("Example", testutil.DefaultItem("guid-1", "First", "Body"))
+	server := testutil.FeedServer(t, &feed)
+	defer server.Close()
+
+	out, err := executeTestCommand(t, "add", "rss", server.URL, "--id", "example", "--name", "Example")
+	if err != nil {
+		t.Fatalf("add rss: %v", err)
+	}
+	if !strings.Contains(out, "Created RSS source example") {
+		t.Fatalf("bad add output: %s", out)
+	}
+
+	out, err = executeTestCommand(t, "sync")
+	if err != nil {
+		t.Fatalf("sync: %v", err)
+	}
+	if !strings.Contains(out, "example: ok new=1") {
+		t.Fatalf("bad sync output: %s", out)
+	}
+
+	out, err = executeTestCommand(t, "--json", "sync", "--source", "example")
+	if err != nil {
+		t.Fatalf("sync json: %v", err)
+	}
+	if !strings.Contains(out, `"action": "sync"`) || !strings.Contains(out, `"unchanged_items": 1`) {
+		t.Fatalf("bad sync json output: %s", out)
+	}
+
+	out, err = executeTestCommand(t, "items", "list", "--unread")
+	if err != nil {
+		t.Fatalf("items list unread: %v", err)
+	}
+	if !strings.Contains(out, "First") || !strings.Contains(out, "read=false") {
+		t.Fatalf("bad items output: %s", out)
+	}
+	itemID := firstField(t, out)
+
+	out, err = executeTestCommand(t, "items", "markdown", itemID)
+	if err != nil {
+		t.Fatalf("items markdown: %v", err)
+	}
+	if !strings.Contains(out, ".md") {
+		t.Fatalf("bad markdown output: %s", out)
+	}
+
+	out, err = executeTestCommand(t, "items", "open", itemID)
+	if err != nil {
+		t.Fatalf("items open: %v", err)
+	}
+	if !strings.Contains(out, "Opened "+itemID) {
+		t.Fatalf("bad open output: %s", out)
+	}
+
+	out, err = executeTestCommand(t, "items", "list", "--json")
+	if err != nil {
+		t.Fatalf("items list json: %v", err)
+	}
+	if !strings.Contains(out, `"action": "items_list"`) || !strings.Contains(out, itemID) {
+		t.Fatalf("bad items json output: %s", out)
+	}
+
+	out, err = executeTestCommand(t, "storage")
+	if err != nil {
+		t.Fatalf("storage: %v", err)
+	}
+	if !strings.Contains(out, "Items: 1") || !strings.Contains(out, "Total:") {
+		t.Fatalf("bad storage output: %s", out)
+	}
+
+	out, err = executeTestCommand(t, "storage", "reconcile", "--json")
+	if err != nil {
+		t.Fatalf("storage reconcile json: %v", err)
+	}
+	if !strings.Contains(out, `"action": "storage_reconcile"`) {
+		t.Fatalf("bad reconcile json output: %s", out)
+	}
+
+	out, err = executeTestCommand(t, "status")
+	if err != nil {
+		t.Fatalf("status: %v", err)
+	}
+	if !strings.Contains(out, "1 unread") || !strings.Contains(out, "src:1") {
+		t.Fatalf("bad status output: %s", out)
+	}
+
+	out, err = executeTestCommand(t, "config", "format", "--yes")
+	if err != nil {
+		t.Fatalf("config format: %v", err)
+	}
+	if !strings.Contains(out, "Config formatted") {
+		t.Fatalf("bad format output: %s", out)
+	}
+}
+
+func TestCLIOutputHelpers(t *testing.T) {
+	if got := exitCode(nil); got != 0 {
+		t.Fatalf("exitCode(nil)=%d", got)
+	}
+	if got := exitCode(app.AppError("item-not-found", "missing", nil)); got != 4 {
+		t.Fatalf("item-not-found exit=%d", got)
+	}
+	if got := exitCode(app.AppError("invalid-url", "bad", nil)); got != 2 {
+		t.Fatalf("invalid-url exit=%d", got)
+	}
+	if got := exitCode(app.AppError("unsupported-source-type", "bad", nil)); got != 3 {
+		t.Fatalf("unsupported-source-type exit=%d", got)
+	}
+	if got := exitCode(errors.New("boom")); got != 1 {
+		t.Fatalf("generic exit=%d", got)
+	}
+
+	var out bytes.Buffer
+	if err := printLines(&out, "one", "two"); err != nil {
+		t.Fatal(err)
+	}
+	if got := out.String(); got != "one\ntwo\n" {
+		t.Fatalf("printLines=%q", got)
+	}
+	if got := plainBool(true); got != "true" {
+		t.Fatalf("plainBool(true)=%q", got)
+	}
+	if got := plainBool(false); got != "false" {
+		t.Fatalf("plainBool(false)=%q", got)
+	}
+	assertTags(t, splitTags(" tech, ,rss "), []string{"tech", "rss"})
+	assertTags(t, splitTags("  "), nil)
+
+	out.Reset()
+	if err := writeError(&out, config.ValidationError{Code: "bad", Message: "bad field", Path: "file", Field: "id"}); err != nil {
+		t.Fatal(err)
+	}
+	if !strings.Contains(out.String(), `"code": "bad"`) || !strings.Contains(out.String(), `"field": "id"`) {
+		t.Fatalf("bad validation error json: %s", out.String())
+	}
+	out.Reset()
+	if err := writeError(&out, config.ValidationErrors{{Code: "first", Message: "one"}, {Code: "second", Message: "two"}}); err != nil {
+		t.Fatal(err)
+	}
+	if !strings.Contains(out.String(), `"code": "first"`) || !strings.Contains(out.String(), `"code": "second"`) {
+		t.Fatalf("bad validation errors json: %s", out.String())
+	}
+}
+
 func executeTestCommand(t *testing.T, args ...string) (string, error) {
 	t.Helper()
 	opts := &options{}
@@ -160,4 +308,25 @@ func executeTestCommand(t *testing.T, args ...string) (string, error) {
 		_ = writeError(&out, err)
 	}
 	return out.String(), err
+}
+
+func firstField(t *testing.T, output string) string {
+	t.Helper()
+	fields := strings.Fields(output)
+	if len(fields) == 0 {
+		t.Fatalf("no fields in output %q", output)
+	}
+	return fields[0]
+}
+
+func assertTags(t *testing.T, got, want []string) {
+	t.Helper()
+	if len(got) != len(want) {
+		t.Fatalf("tags=%v want %v", got, want)
+	}
+	for i := range want {
+		if got[i] != want[i] {
+			t.Fatalf("tags=%v want %v", got, want)
+		}
+	}
 }
