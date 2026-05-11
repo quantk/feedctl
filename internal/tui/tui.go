@@ -817,7 +817,12 @@ func fillStyled(text string, width int, style lipgloss.Style) string {
 	if width <= 0 {
 		return ""
 	}
+	text = inlineText(text)
 	visible := lipgloss.Width(text)
+	if visible > width {
+		text = xansi.Truncate(text, width, "")
+		visible = lipgloss.Width(text)
+	}
 	if visible >= width {
 		return text
 	}
@@ -856,6 +861,7 @@ func truncateText(text string, width int) string {
 	if width <= 0 {
 		return ""
 	}
+	text = inlineText(text)
 	if xansi.StringWidth(text) <= width {
 		return text
 	}
@@ -863,6 +869,20 @@ func truncateText(text string, width int) string {
 		return "…"
 	}
 	return xansi.Truncate(text, width, "…")
+}
+
+func inlineText(text string) string {
+	text = strings.ReplaceAll(text, "\r\n", " ")
+	text = strings.NewReplacer("\n", " ", "\r", " ", "\t", " ").Replace(text)
+	return strings.Map(func(r rune) rune {
+		if r == '\x1b' {
+			return r
+		}
+		if r < 0x20 || r == 0x7f {
+			return -1
+		}
+		return r
+	}, text)
 }
 
 func (m *Model) reload() error {

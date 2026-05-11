@@ -251,6 +251,11 @@ The TUI SHALL run as a fullscreen terminal interface and render a complete view 
 - **WHEN** the TUI renders the main view with known terminal dimensions
 - **THEN** the rendered view includes header, navigation, content, and status regions sized to occupy the available terminal height without leaving the interface as a small partial block
 
+#### Scenario: TUI frame remains stable while scrolling unsafe row text
+- **WHEN** the user scrolls to an item whose title or row text contains embedded line breaks or overlong text
+- **THEN** the TUI renders that row as a single clipped visual line
+- **AND** the header, navigation, content, and status regions remain visible within the terminal height
+
 ### Requirement: Nord-themed visual styling
 The TUI SHALL use a Nord-inspired visual theme for the main interface, help view, selected rows, status information, and item state indicators.
 

@@ -2,6 +2,7 @@ package tui
 
 import (
 	"context"
+	"fmt"
 	"net/http"
 	"net/http/httptest"
 	"path/filepath"
@@ -557,18 +558,45 @@ func TestTUIWindowSizeAndFullHeightRender(t *testing.T) {
 		t.Fatalf("size=%dx%d", m.width, m.height)
 	}
 	view := m.View()
-	lines := strings.Split(view, "\n")
-	if got := len(lines); got != 16 {
-		t.Fatalf("rendered lines=%d want=16\n%s", got, view)
-	}
-	for i, line := range lines {
-		if got := lipgloss.Width(visibleText(line)); got != 72 {
-			t.Fatalf("line %d width=%d want=72: %q", i, got, line)
-		}
-	}
+	assertTUIViewFrame(t, view, 72, 16)
 	if !strings.Contains(view, "feedctl") {
 		t.Fatal("view does not include header")
 	}
+}
+
+func TestTUIScrollKeepsFrameWhenItemTitleContainsLineBreak(t *testing.T) {
+	testutil.IsolatedEnv(t)
+	a, err := app.Open(context.Background())
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer a.Close()
+	if err := a.Store.UpsertConfiguredSource(config.Source{ID: "example", Type: config.SourceTypeRSS, Name: "Example", URL: "https://example.com/feed.xml", Enabled: true}); err != nil {
+		t.Fatal(err)
+	}
+	for i := range 12 {
+		title := "Item title"
+		if i == 8 {
+			title = "Item with\nline break"
+		}
+		if err := a.Store.CreateItem(store.Item{ID: fmt.Sprintf("item-%02d", i), SourceID: "example", SourceItemID: fmt.Sprintf("guid-%02d", i), IdentityKind: "guid", Title: title, URL: fmt.Sprintf("https://example.com/%02d", i), ContentPath: fmt.Sprintf("example/%02d.md", i), ContentHash: fmt.Sprintf("sha256:%02d", i), Version: 1, PublishedAt: fmt.Sprintf("2026-05-11T00:%02d:00Z", i)}); err != nil {
+			t.Fatal(err)
+		}
+	}
+
+	m := updateWindowSize(t, NewModel(a), 72, 10)
+	for i, item := range m.items {
+		if strings.Contains(item.Title, "line break") {
+			m.cursor = i
+			break
+		}
+	}
+	if !strings.Contains(m.items[m.cursor].Title, "\n") {
+		t.Fatalf("test setup did not select multiline item: cursor=%d title=%q", m.cursor, m.items[m.cursor].Title)
+	}
+
+	view := m.View()
+	assertTUIViewFrame(t, view, 72, 10)
 }
 
 func TestTUISelectionMarkerUsesVerticalBar(t *testing.T) {
@@ -618,6 +646,26 @@ func assertTUIReadState(t *testing.T, a *app.App, itemID string, wantRead bool) 
 	}
 	if gotRead := item.ReadAt != ""; gotRead != wantRead {
 		t.Fatalf("item %s read=%v want %v", itemID, gotRead, wantRead)
+	}
+}
+
+func assertTUIViewFrame(t *testing.T, view string, width, height int) {
+	t.Helper()
+	lines := strings.Split(view, "\n")
+	if got := len(lines); got != height {
+		t.Fatalf("rendered lines=%d want=%d\n%s", got, height, visibleText(view))
+	}
+	for i, line := range lines {
+		if got := lipgloss.Width(visibleText(line)); got != width {
+			t.Fatalf("line %d width=%d want=%d: %q\n%s", i, got, width, visibleText(line), visibleText(view))
+		}
+	}
+	if !strings.Contains(view, "feedctl") {
+		t.Fatalf("view does not include header:\n%s", visibleText(view))
+	}
+	lastLine := visibleText(lines[len(lines)-1])
+	if !strings.Contains(lastLine, "sync") && !strings.Contains(lastLine, "unread") {
+		t.Fatalf("view does not include status bar:\n%s", visibleText(view))
 	}
 }
 
