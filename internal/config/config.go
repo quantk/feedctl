@@ -12,6 +12,9 @@ import (
 	"strings"
 	"time"
 
+	"feedctl/internal/atomicfile"
+	"feedctl/internal/domain"
+
 	"github.com/pelletier/go-toml/v2"
 )
 
@@ -63,6 +66,7 @@ type SyncConfig struct {
 	DefaultInterval string `toml:"default_interval" json:"default_interval"`
 	Concurrency     int    `toml:"concurrency" json:"concurrency"`
 	SyncOnStartup   bool   `toml:"sync_on_startup" json:"sync_on_startup"`
+	FetchTimeout    string `toml:"fetch_timeout" json:"fetch_timeout"`
 }
 
 type TUIConfig struct {
@@ -151,6 +155,7 @@ func DefaultConfig(home string) Config {
 			DefaultInterval: "5m",
 			Concurrency:     4,
 			SyncOnStartup:   true,
+			FetchTimeout:    "30s",
 		},
 		TUI: TUIConfig{
 			Editor:             getenvDefault("EDITOR", "nvim"),
@@ -297,6 +302,11 @@ func (l Loaded) Validate() error {
 	if l.Config.Sync.Concurrency < 1 {
 		errs = append(errs, ValidationError{Path: l.Paths.ConfigFile, Field: "sync.concurrency", Code: "invalid-concurrency", Message: "concurrency must be at least 1"})
 	}
+	if l.Config.Sync.FetchTimeout != "" {
+		if _, err := time.ParseDuration(l.Config.Sync.FetchTimeout); err != nil {
+			errs = append(errs, ValidationError{Path: l.Paths.ConfigFile, Field: "sync.fetch_timeout", Code: "invalid-duration", Message: err.Error()})
+		}
+	}
 	seen := map[string]string{}
 	for _, src := range l.Sources {
 		if src.ID == "" {
@@ -310,7 +320,7 @@ func (l Loaded) Validate() error {
 		}
 		if src.Type == "" {
 			errs = append(errs, ValidationError{Path: src.FilePath, Field: "type", Code: "missing-source-type", Message: "source type is required"})
-		} else if src.Type != SourceTypeRSS && src.Type != SourceTypeTelegram {
+		} else if _, err := domain.ParseSourceType(src.Type); err != nil {
 			errs = append(errs, ValidationError{Path: src.FilePath, Field: "type", Code: "unsupported-source-type", Message: "only rss and telegram sources are supported"})
 		}
 		if src.URL == "" {
@@ -351,7 +361,7 @@ func WriteSource(path string, src Source) error {
 	if err != nil {
 		return err
 	}
-	return os.WriteFile(path, data, 0o644)
+	return atomicfile.WriteFile(path, data, 0o644)
 }
 
 func MarshalSource(src Source) ([]byte, error) {
@@ -418,7 +428,7 @@ func FormatExisting(loaded Loaded) error {
 		if err != nil {
 			return err
 		}
-		if err := os.WriteFile(loaded.Paths.ConfigFile, data, 0o644); err != nil {
+		if err := atomicfile.WriteFile(loaded.Paths.ConfigFile, data, 0o644); err != nil {
 			return err
 		}
 	} else if err != nil && !errors.Is(err, os.ErrNotExist) {
@@ -454,6 +464,9 @@ func applyDefaults(cfg *Config, home string) {
 	}
 	if cfg.Sync.Concurrency == 0 {
 		cfg.Sync.Concurrency = defaults.Sync.Concurrency
+	}
+	if cfg.Sync.FetchTimeout == "" {
+		cfg.Sync.FetchTimeout = defaults.Sync.FetchTimeout
 	}
 	if cfg.TUI.Editor == "" {
 		cfg.TUI.Editor = defaults.TUI.Editor

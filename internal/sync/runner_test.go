@@ -14,6 +14,7 @@ import (
 	"feedctl/internal/app"
 	"feedctl/internal/config"
 	"feedctl/internal/store"
+	feedSync "feedctl/internal/sync"
 	"feedctl/internal/testutil"
 )
 
@@ -66,6 +67,45 @@ func TestRSSSyncConcurrentSourcesRaceRegression(t *testing.T) {
 		if src.Status != "ok" || src.NewItems != 1 {
 			t.Fatalf("unexpected source result: %#v", res.Sources)
 		}
+	}
+}
+
+func TestRSSSyncUsesConfiguredFetchTimeout(t *testing.T) {
+	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		<-r.Context().Done()
+	}))
+	defer server.Close()
+
+	root := t.TempDir()
+	paths := config.Paths{
+		Database:    filepath.Join(root, "feedctl.db"),
+		ContentDir:  filepath.Join(root, "content"),
+		VersionsDir: filepath.Join(root, "versions"),
+		TmpDir:      filepath.Join(root, "tmp"),
+	}
+	st, err := store.Open(paths.Database)
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer st.Close()
+	src := config.Source{ID: "slow", Type: config.SourceTypeRSS, Name: "Slow", URL: server.URL, Enabled: true, Interval: "5m"}
+	if err := st.UpsertConfiguredSource(src); err != nil {
+		t.Fatal(err)
+	}
+	cfg := config.DefaultConfig(root)
+	cfg.Sync.FetchTimeout = "10ms"
+	runner := feedSync.NewRunner(st, paths, cfg)
+
+	start := time.Now()
+	res := runner.RunAll(context.Background(), []config.Source{src}, feedSync.Options{})
+	if res.OK || len(res.Sources) != 1 || res.Sources[0].Status != "failed" {
+		t.Fatalf("sync result=%#v want timeout failure", res)
+	}
+	if elapsed := time.Since(start); elapsed > time.Second {
+		t.Fatalf("fetch timeout took too long: %s", elapsed)
+	}
+	if len(res.Sources[0].Errors) == 0 || !strings.Contains(res.Sources[0].Errors[0], "deadline") {
+		t.Fatalf("errors=%v want deadline error", res.Sources[0].Errors)
 	}
 }
 

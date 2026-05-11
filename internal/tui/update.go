@@ -3,14 +3,14 @@ package tui
 import (
 	"time"
 
-	"feedctl/internal/store"
+	"feedctl/internal/app"
 
 	tea "github.com/charmbracelet/bubbletea"
 )
 
 func (m Model) Init() tea.Cmd {
 	cmds := []tea.Cmd{tickCmd(m.interval())}
-	if m.app.Loaded.Config.Sync.SyncOnStartup {
+	if m.app.Config().Sync.SyncOnStartup {
 		cmds = append(cmds, syncCmd(m.ctx, m.app))
 	}
 	return tea.Batch(cmds...)
@@ -131,7 +131,7 @@ func (m Model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 		case " ":
 			if m.hasSelection() {
 				m.batchToggleRead()
-			} else if err := m.withSelectedErr(func(item store.Item) error { return m.app.ToggleRead(item.ID) }); err != nil {
+			} else if err := m.withSelectedErr(func(item app.Item) error { return m.app.ToggleRead(item.ID) }); err != nil {
 				m.setError("toggle read failed", err)
 				return m, nil
 			}
@@ -139,29 +139,29 @@ func (m Model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 		case "u":
 			if m.hasSelection() {
 				m.batchSetRead(false)
-			} else if err := m.withSelectedErr(func(item store.Item) error { return m.app.SetRead(item.ID, false) }); err != nil {
+			} else if err := m.withSelectedErr(func(item app.Item) error { return m.app.SetRead(item.ID, false) }); err != nil {
 				m.setError("mark unread failed", err)
 				return m, nil
 			}
 			_ = m.reload()
 		case "s":
-			if err := m.withSelectedErr(func(item store.Item) error { return m.app.ToggleStarred(item.ID) }); err != nil {
+			if err := m.withSelectedErr(func(item app.Item) error { return m.app.ToggleStarred(item.ID) }); err != nil {
 				m.setError("star failed", err)
 				return m, nil
 			}
 			_ = m.reload()
 		case "a":
-			if err := m.withSelectedErr(func(item store.Item) error { return m.app.Archive(item.ID) }); err != nil {
+			if err := m.withSelectedErr(func(item app.Item) error { return m.app.Archive(item.ID) }); err != nil {
 				m.setError("archive failed", err)
 				return m, nil
 			}
 			_ = m.reload()
 		case "o":
-			if err := m.withSelectedErr(func(item store.Item) error { return m.app.OpenItem(m.ctx, item.ID) }); err != nil {
+			if err := m.withSelectedErr(func(item app.Item) error { return m.app.OpenItem(m.ctx, item.ID) }); err != nil {
 				m.setError("open URL failed", err)
 			}
 		case "e":
-			if err := m.withSelectedErr(func(item store.Item) error { return m.app.OpenMarkdown(m.ctx, item.ID) }); err != nil {
+			if err := m.withSelectedErr(func(item app.Item) error { return m.app.OpenMarkdown(m.ctx, item.ID) }); err != nil {
 				m.setError("open Markdown failed", err)
 			}
 		case "m":

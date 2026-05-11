@@ -5,8 +5,8 @@ import (
 	"os"
 	"strings"
 
+	"feedctl/internal/app"
 	"feedctl/internal/metrics"
-	"feedctl/internal/store"
 
 	"github.com/charmbracelet/lipgloss"
 	xansi "github.com/charmbracelet/x/ansi"
@@ -154,7 +154,7 @@ func (m Model) renderList(width, height int) string {
 	return fitLines(lines, width, height, bodyStyle)
 }
 
-func (m Model) renderItemRow(item store.Item, selected bool, width int, multiSelected ...bool) string {
+func (m Model) renderItemRow(item app.Item, selected bool, width int, multiSelected ...bool) string {
 	baseStyle := bodyStyle
 	markerStyle := bodyStyle
 	readMarkerStyle := readStyle
@@ -257,7 +257,7 @@ func formatScore(score int) string {
 	return fmt.Sprintf("%d", score)
 }
 
-func (m Model) renderSourceRow(src store.Source, selected bool, width int) string {
+func (m Model) renderSourceRow(src app.Source, selected bool, width int) string {
 	baseStyle := bodyStyle
 	markerStyle := bodyStyle
 	accentRowStyle := accentStyle
@@ -346,7 +346,7 @@ func (m Model) renderStatus(width int) string {
 		unreadStyle.Render(fmt.Sprintf("●%d unread", m.status.UnreadCount)),
 		mutedStyle.Render(fmt.Sprintf("src:%d", m.status.SourceCount)),
 		mutedStyle.Render(fmt.Sprintf("removed:%d", m.status.RemovedSourceCount)),
-		mutedStyle.Render("disk:" + store.HumanBytes(m.status.Storage.Total())),
+		mutedStyle.Render("disk:" + app.HumanBytes(m.status.Storage.Total())),
 		syncStateStyle(syncStatus).Render("sync " + syncStatus),
 	}
 	if m.status.LatestSyncAt != "" {
@@ -547,5 +547,5 @@ func (m Model) previewLines(limit, width int) []string {
 }
 
 func (m Model) statusLine() string {
-	return fmt.Sprintf("●%d unread | src:%d | removed:%d | disk:%s | sync %s | %s %s", m.status.UnreadCount, m.status.SourceCount, m.status.RemovedSourceCount, store.HumanBytes(m.status.Storage.Total()), m.currentSyncStatus(), m.status.LatestSyncAt, m.message)
+	return fmt.Sprintf("●%d unread | src:%d | removed:%d | disk:%s | sync %s | %s %s", m.status.UnreadCount, m.status.SourceCount, m.status.RemovedSourceCount, app.HumanBytes(m.status.Storage.Total()), m.currentSyncStatus(), m.status.LatestSyncAt, m.message)
 }

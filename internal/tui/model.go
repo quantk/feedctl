@@ -8,15 +8,14 @@ import (
 
 	"feedctl/internal/app"
 	"feedctl/internal/config"
-	"feedctl/internal/store"
 )
 
 type Model struct {
 	ctx             context.Context
 	app             *app.App
-	items           []store.Item
-	sources         []store.Source
-	status          store.StatusSummary
+	items           []app.Item
+	sources         []app.Source
+	status          app.StatusSummary
 	section         int
 	cursor          int
 	reader          bool
@@ -47,7 +46,7 @@ func NewModelWithContext(ctx context.Context, a *app.App) Model {
 	}
 	showRemoved := false
 	if a != nil {
-		showRemoved = a.Loaded.Config.TUI.ShowRemovedSources
+		showRemoved = a.Config().TUI.ShowRemovedSources
 	}
 	m := Model{ctx: ctx, app: a, showRemoved: showRemoved, selectedItems: map[string]struct{}{}, width: defaultViewWidth, height: defaultViewHeight, lastPeriodic: map[string]time.Time{}}
 	_ = m.reload()
@@ -67,7 +66,7 @@ func (m *Model) reload() error {
 		m.clearSelection()
 		m.sources = sources
 	} else {
-		filter := store.ItemFilter{}
+		filter := app.ItemFilter{}
 		switch m.section {
 		case 1:
 			filter.Unread = true
@@ -154,7 +153,7 @@ func (m *Model) markSelectedRead() {
 	m.status = status
 }
 
-func (m Model) withSelectedErr(fn func(store.Item) error) error {
+func (m Model) withSelectedErr(fn func(app.Item) error) error {
 	if m.section == 3 || m.cursor < 0 || m.cursor >= len(m.items) {
 		return nil
 	}
@@ -255,11 +254,11 @@ func (m *Model) updateSelectionRange() {
 	m.selectedItems = selected
 }
 
-func (m Model) selectedVisibleItems() []store.Item {
+func (m Model) selectedVisibleItems() []app.Item {
 	if len(m.selectedItems) == 0 {
 		return nil
 	}
-	items := make([]store.Item, 0, len(m.selectedItems))
+	items := make([]app.Item, 0, len(m.selectedItems))
 	for _, item := range m.items {
 		if m.itemSelected(item.ID) {
 			items = append(items, item)
@@ -291,7 +290,7 @@ func (m *Model) batchSetRead(read bool) {
 	m.batchSetReadForItems(items, read)
 }
 
-func (m *Model) batchSetReadForItems(items []store.Item, read bool) {
+func (m *Model) batchSetReadForItems(items []app.Item, read bool) {
 	for _, item := range items {
 		_ = m.app.SetRead(item.ID, read)
 	}
@@ -325,9 +324,9 @@ func (m *Model) findNext(dir int) {
 	}
 }
 
-func filterItems(items []store.Item, q string) []store.Item {
+func filterItems(items []app.Item, q string) []app.Item {
 	q = strings.ToLower(q)
-	var out []store.Item
+	var out []app.Item
 	for _, item := range items {
 		if strings.Contains(strings.ToLower(item.Title), q) || strings.Contains(strings.ToLower(item.SourceID), q) {
 			out = append(out, item)
@@ -345,7 +344,7 @@ func trimLastRune(s string) string {
 }
 
 func (m Model) interval() time.Duration {
-	d, err := config.ParseDuration(m.app.Loaded.Config.Sync.DefaultInterval)
+	d, err := config.ParseDuration(m.app.Config().Sync.DefaultInterval)
 	if err != nil || d <= 0 {
 		return 5 * time.Minute
 	}
@@ -357,13 +356,13 @@ func (m *Model) dueSources(now time.Time) []string {
 		m.lastPeriodic = map[string]time.Time{}
 	}
 	var due []string
-	for _, src := range m.app.Loaded.Sources {
+	for _, src := range m.app.ConfiguredSources() {
 		if !src.Enabled {
 			continue
 		}
 		intervalValue := src.Interval
 		if intervalValue == "" {
-			intervalValue = m.app.Loaded.Config.Sync.DefaultInterval
+			intervalValue = m.app.Config().Sync.DefaultInterval
 		}
 		interval, err := config.ParseDuration(intervalValue)
 		if err != nil || interval <= 0 {

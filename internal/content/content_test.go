@@ -48,6 +48,13 @@ func TestPathsCollisionsSafeWriteAndVersion(t *testing.T) {
 	if b, err := os.ReadFile(abs); err != nil || string(b) != "hello" {
 		t.Fatalf("read %s: %s %v", abs, string(b), err)
 	}
+	blockedTmp := filepath.Join(root, "blocked-tmp")
+	if err := os.WriteFile(blockedTmp, []byte("not a dir"), 0o644); err != nil {
+		t.Fatal(err)
+	}
+	if _, _, err := SafeWrite(filepath.Join(root, "content"), "src/2026/05/destination-temp.md", blockedTmp, []byte("same fs")); err != nil {
+		t.Fatalf("SafeWrite should create temp files in destination directory, got %v", err)
+	}
 	versionRel, versionSize, err := SaveVersion(filepath.Join(root, "versions"), "item_1", 1, abs, tmp)
 	if err != nil {
 		t.Fatal(err)

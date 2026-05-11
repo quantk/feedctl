@@ -4,7 +4,6 @@ import (
 	"fmt"
 
 	"feedctl/internal/app"
-	"feedctl/internal/store"
 
 	"github.com/spf13/cobra"
 )
@@ -23,7 +22,7 @@ func newStorageCommand(opts *options) *cobra.Command {
 		if opts.JSON {
 			return writeSuccess(cmd.OutOrStdout(), "storage", false, stats)
 		}
-		_, _ = fmt.Fprintf(cmd.OutOrStdout(), "Items: %d\nCurrent markdown: %s\nVersions: %s\nDatabase: %s\nTotal: %s\n", stats.ItemsCount, store.HumanBytes(stats.CurrentMarkdownBytes), store.HumanBytes(stats.VersionsBytes), store.HumanBytes(stats.DatabaseBytes), store.HumanBytes(stats.Total()))
+		_, _ = fmt.Fprintf(cmd.OutOrStdout(), "Items: %d\nCurrent markdown: %s\nVersions: %s\nDatabase: %s\nTotal: %s\n", stats.ItemsCount, app.HumanBytes(stats.CurrentMarkdownBytes), app.HumanBytes(stats.VersionsBytes), app.HumanBytes(stats.DatabaseBytes), app.HumanBytes(stats.Total()))
 		return nil
 	}}
 	cmd.AddCommand(&cobra.Command{Use: "reconcile", Short: "reconcile storage", RunE: func(cmd *cobra.Command, args []string) error {
@@ -39,7 +38,7 @@ func newStorageCommand(opts *options) *cobra.Command {
 		if opts.JSON {
 			return writeSuccess(cmd.OutOrStdout(), "storage_reconcile", false, res)
 		}
-		_, _ = fmt.Fprintf(cmd.OutOrStdout(), "Reconciled storage: total %s\n", store.HumanBytes(res.Storage.Total()))
+		_, _ = fmt.Fprintf(cmd.OutOrStdout(), "Reconciled storage: total %s\n", app.HumanBytes(res.Storage.Total()))
 		return nil
 	}})
 	return cmd

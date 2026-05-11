@@ -4,7 +4,6 @@ import (
 	"fmt"
 
 	"feedctl/internal/app"
-	"feedctl/internal/store"
 
 	"github.com/spf13/cobra"
 )
@@ -18,7 +17,7 @@ func newItemsCommand(opts *options) *cobra.Command {
 			return err
 		}
 		defer a.Close()
-		items, err := a.Items(store.ItemFilter{Unread: unread, RemovedSources: removed})
+		items, err := a.Items(app.ItemFilter{Unread: unread, RemovedSources: removed})
 		if err != nil {
 			return err
 		}

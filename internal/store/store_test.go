@@ -83,6 +83,25 @@ func TestSourceLifecycleListingAndSyncStatus(t *testing.T) {
 	}
 }
 
+func TestSourceMappingRejectsUnknownLifecycleAndSyncStatus(t *testing.T) {
+	db, _ := openStoreTestDB(t)
+	defer db.Close()
+	upsertStoreSource(t, db, config.Source{ID: "bad", Type: "rss", Name: "Bad", URL: "https://example.com/feed.xml", Enabled: true})
+
+	if _, err := db.Raw().Exec(`UPDATE runtime_sources SET lifecycle='mystery' WHERE id='bad'`); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := db.GetSource("bad"); err == nil {
+		t.Fatal("GetSource accepted unknown lifecycle")
+	}
+	if _, err := db.Raw().Exec(`UPDATE runtime_sources SET lifecycle='active', last_sync_status='mystery' WHERE id='bad'`); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := db.ListSources(true); err == nil {
+		t.Fatal("ListSources accepted unknown sync status")
+	}
+}
+
 func TestItemFiltersStateTransitionsAndUpdates(t *testing.T) {
 	db, _ := openStoreTestDB(t)
 	defer db.Close()

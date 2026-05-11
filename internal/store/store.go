@@ -1,6 +1,7 @@
 package store
 
 import (
+	"context"
 	"database/sql"
 	"encoding/json"
 	"errors"
@@ -12,6 +13,7 @@ import (
 	"time"
 
 	"feedctl/internal/config"
+	"feedctl/internal/domain"
 	"feedctl/internal/metrics"
 
 	_ "modernc.org/sqlite"
@@ -135,6 +137,14 @@ var migrations = []migration{
 		}
 		return nil
 	}},
+	{version: 2, up: func(tx *sql.Tx) error {
+		_, err := tx.Exec(`CREATE TABLE IF NOT EXISTS sync_locks (
+			source_id TEXT PRIMARY KEY,
+			owner TEXT NOT NULL,
+			acquired_at TEXT NOT NULL
+		)`)
+		return err
+	}},
 }
 
 var initialSchemaStatements = []string{
@@ -224,6 +234,17 @@ func (d *DB) applyMigrations(steps []migration) error {
 	}
 	ordered := append([]migration(nil), steps...)
 	sort.Slice(ordered, func(i, j int) bool { return ordered[i].version < ordered[j].version })
+	maxKnown := 0
+	for _, step := range ordered {
+		if step.version > maxKnown {
+			maxKnown = step.version
+		}
+	}
+	for version := range applied {
+		if version > maxKnown {
+			return fmt.Errorf("future schema version %d is newer than this feedctl binary supports (max %d); upgrade feedctl or restore a compatible backup", version, maxKnown)
+		}
+	}
 	for _, step := range ordered {
 		if _, ok := applied[step.version]; ok {
 			continue
@@ -280,13 +301,65 @@ func (d *DB) applyMigration(step migration) error {
 }
 
 func (d *DB) UpsertConfiguredSource(src config.Source) error {
+	return d.upsertConfiguredSource(context.Background(), d.db, src)
+}
+
+func (d *DB) MarkRemovedExcept(activeIDs map[string]struct{}) error {
+	return d.markRemovedExcept(context.Background(), d.db, activeIDs)
+}
+
+func (d *DB) ReconcileConfiguredSources(ctx context.Context, sources []config.Source) error {
+	if ctx == nil {
+		ctx = context.Background()
+	}
+	tx, err := d.db.BeginTx(ctx, nil)
+	if err != nil {
+		return err
+	}
+	committed := false
+	defer func() {
+		if !committed {
+			_ = tx.Rollback()
+		}
+	}()
+	activeIDs := make(map[string]struct{}, len(sources))
+	for _, src := range sources {
+		activeIDs[src.ID] = struct{}{}
+		if err := d.upsertConfiguredSource(ctx, tx, src); err != nil {
+			return err
+		}
+	}
+	if err := d.markRemovedExcept(ctx, tx, activeIDs); err != nil {
+		return err
+	}
+	if err := tx.Commit(); err != nil {
+		return err
+	}
+	committed = true
+	return nil
+}
+
+type execContexter interface {
+	ExecContext(context.Context, string, ...any) (sql.Result, error)
+}
+
+type queryContexter interface {
+	QueryContext(context.Context, string, ...any) (*sql.Rows, error)
+}
+
+type storeContexter interface {
+	execContexter
+	queryContexter
+}
+
+func (d *DB) upsertConfiguredSource(ctx context.Context, exec execContexter, src config.Source) error {
 	tags, _ := json.Marshal(src.Tags)
 	lifecycle := "disabled"
 	if src.Enabled {
 		lifecycle = "active"
 	}
 	now := nowString()
-	_, err := d.db.Exec(`INSERT INTO runtime_sources
+	_, err := exec.ExecContext(ctx, `INSERT INTO runtime_sources
 		(id, type, name, url, lifecycle, enabled, interval, tags_json, created_at, updated_at)
 		VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
 		ON CONFLICT(id) DO UPDATE SET
@@ -303,8 +376,8 @@ func (d *DB) UpsertConfiguredSource(src config.Source) error {
 	return err
 }
 
-func (d *DB) MarkRemovedExcept(activeIDs map[string]struct{}) error {
-	rows, err := d.db.Query(`SELECT id FROM runtime_sources`)
+func (d *DB) markRemovedExcept(ctx context.Context, query storeContexter, activeIDs map[string]struct{}) error {
+	rows, err := query.QueryContext(ctx, `SELECT id FROM runtime_sources`)
 	if err != nil {
 		return err
 	}
@@ -324,7 +397,7 @@ func (d *DB) MarkRemovedExcept(activeIDs map[string]struct{}) error {
 	}
 	now := nowString()
 	for _, id := range ids {
-		if _, err := d.db.Exec(`UPDATE runtime_sources SET lifecycle='removed', enabled=0, removed_at=CASE WHEN removed_at='' THEN ? ELSE removed_at END, updated_at=? WHERE id=?`, now, now, id); err != nil {
+		if _, err := query.ExecContext(ctx, `UPDATE runtime_sources SET lifecycle='removed', enabled=0, removed_at=CASE WHEN removed_at='' THEN ? ELSE removed_at END, updated_at=? WHERE id=?`, now, now, id); err != nil {
 			return err
 		}
 	}
@@ -363,14 +436,49 @@ func (d *DB) GetSource(id string) (Source, error) {
 }
 
 func (d *DB) UpdateSourceSyncStatus(id, status, message string, newItems, updatedItems, unchangedItems int) error {
+	return d.UpdateSourceSyncStatusContext(context.Background(), id, status, message, newItems, updatedItems, unchangedItems)
+}
+
+func (d *DB) UpdateSourceSyncStatusContext(ctx context.Context, id, status, message string, newItems, updatedItems, unchangedItems int) error {
 	_ = newItems
 	_ = updatedItems
 	_ = unchangedItems
-	_, err := d.db.Exec(`UPDATE runtime_sources SET last_sync_at=?, last_sync_status=?, last_error=?, updated_at=? WHERE id=?`, nowString(), status, message, nowString(), id)
+	if _, err := domain.ParseSyncStatus(status); err != nil {
+		return err
+	}
+	_, err := d.db.ExecContext(ctx, `UPDATE runtime_sources SET last_sync_at=?, last_sync_status=?, last_error=?, updated_at=? WHERE id=?`, nowString(), status, message, nowString(), id)
 	return err
 }
 
+func (d *DB) AcquireSourceSyncLock(ctx context.Context, sourceID string) (func() error, error) {
+	if ctx == nil {
+		ctx = context.Background()
+	}
+	owner := fmt.Sprintf("%d-%d", os.Getpid(), time.Now().UnixNano())
+	for {
+		res, err := d.db.ExecContext(ctx, `INSERT OR IGNORE INTO sync_locks(source_id, owner, acquired_at) VALUES (?, ?, ?)`, sourceID, owner, nowString())
+		if err != nil {
+			return nil, err
+		}
+		if rows, err := res.RowsAffected(); err == nil && rows == 1 {
+			return func() error {
+				_, err := d.db.ExecContext(context.Background(), `DELETE FROM sync_locks WHERE source_id=? AND owner=?`, sourceID, owner)
+				return err
+			}, nil
+		}
+		select {
+		case <-ctx.Done():
+			return nil, ctx.Err()
+		case <-time.After(25 * time.Millisecond):
+		}
+	}
+}
+
 func (d *DB) CreateItem(item Item) error {
+	return d.CreateItemContext(context.Background(), item)
+}
+
+func (d *DB) CreateItemContext(ctx context.Context, item Item) error {
 	if item.FetchedAt == "" {
 		item.FetchedAt = nowString()
 	}
@@ -381,7 +489,7 @@ func (d *DB) CreateItem(item Item) error {
 		item.Version = 1
 	}
 	tags, _ := json.Marshal(item.Tags)
-	_, err := d.db.Exec(`INSERT INTO items
+	_, err := d.db.ExecContext(ctx, `INSERT INTO items
 		(id, source_id, source_item_id, identity_kind, title, url, canonical_url, published_at, fetched_at, last_seen_at, content_path, content_hash, version, read_at, starred, archived_at, updated_at, tags_json)
 		VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`,
 		item.ID, item.SourceID, item.SourceItemID, item.IdentityKind, item.Title, item.URL, item.CanonicalURL, item.PublishedAt, item.FetchedAt, item.LastSeenAt, item.ContentPath, item.ContentHash, item.Version, item.ReadAt, boolInt(item.Starred), item.ArchivedAt, item.UpdatedAt, string(tags))
@@ -389,7 +497,11 @@ func (d *DB) CreateItem(item Item) error {
 }
 
 func (d *DB) FindItemBySourceIdentity(sourceID, sourceItemID string) (Item, error) {
-	row := d.db.QueryRow(itemSelect()+` WHERE i.source_id=? AND i.source_item_id=?`, sourceID, sourceItemID)
+	return d.FindItemBySourceIdentityContext(context.Background(), sourceID, sourceItemID)
+}
+
+func (d *DB) FindItemBySourceIdentityContext(ctx context.Context, sourceID, sourceItemID string) (Item, error) {
+	row := d.db.QueryRowContext(ctx, itemSelect()+` WHERE i.source_id=? AND i.source_item_id=?`, sourceID, sourceItemID)
 	item, err := scanItem(row)
 	if errors.Is(err, sql.ErrNoRows) {
 		return Item{}, ErrNotFound
@@ -407,13 +519,21 @@ func (d *DB) GetItem(id string) (Item, error) {
 }
 
 func (d *DB) IsContentPathAssigned(path, exceptItemID string) (bool, error) {
+	return d.IsContentPathAssignedContext(context.Background(), path, exceptItemID)
+}
+
+func (d *DB) IsContentPathAssignedContext(ctx context.Context, path, exceptItemID string) (bool, error) {
 	var count int
-	err := d.db.QueryRow(`SELECT COUNT(*) FROM items WHERE content_path=? AND id<>?`, path, exceptItemID).Scan(&count)
+	err := d.db.QueryRowContext(ctx, `SELECT COUNT(*) FROM items WHERE content_path=? AND id<>?`, path, exceptItemID).Scan(&count)
 	return count > 0, err
 }
 
 func (d *DB) UpdateItemSeen(id string) error {
-	_, err := d.db.Exec(`UPDATE items SET last_seen_at=? WHERE id=?`, nowString(), id)
+	return d.UpdateItemSeenContext(context.Background(), id)
+}
+
+func (d *DB) UpdateItemSeenContext(ctx context.Context, id string) error {
+	_, err := d.db.ExecContext(ctx, `UPDATE items SET last_seen_at=? WHERE id=?`, nowString(), id)
 	return err
 }
 
@@ -424,6 +544,10 @@ func (d *DB) UpdateItemChanged(item Item) error {
 }
 
 func (d *DB) UpsertItemMetrics(itemID string, itemMetrics metrics.ItemMetrics) error {
+	return d.UpsertItemMetricsContext(context.Background(), itemID, itemMetrics)
+}
+
+func (d *DB) UpsertItemMetricsContext(ctx context.Context, itemID string, itemMetrics metrics.ItemMetrics) error {
 	if itemMetrics.FetchedAt == "" {
 		itemMetrics.FetchedAt = nowString()
 	}
@@ -431,7 +555,7 @@ func (d *DB) UpsertItemMetrics(itemID string, itemMetrics metrics.ItemMetrics) e
 	if err != nil {
 		return err
 	}
-	_, err = d.db.Exec(`INSERT INTO item_metrics(item_id, provider, fetched_at, metrics_json) VALUES (?, ?, ?, ?)
+	_, err = d.db.ExecContext(ctx, `INSERT INTO item_metrics(item_id, provider, fetched_at, metrics_json) VALUES (?, ?, ?, ?)
 		ON CONFLICT(item_id) DO UPDATE SET provider=excluded.provider, fetched_at=excluded.fetched_at, metrics_json=excluded.metrics_json`,
 		itemID, itemMetrics.Provider, itemMetrics.FetchedAt, string(data))
 	return err
@@ -444,7 +568,11 @@ func (d *DB) AddItemVersion(v ItemVersion) error {
 }
 
 func (d *DB) AddItemVersionAndUpdateItemChanged(v ItemVersion, item Item) error {
-	tx, err := d.db.Begin()
+	return d.AddItemVersionAndUpdateItemChangedContext(context.Background(), v, item)
+}
+
+func (d *DB) AddItemVersionAndUpdateItemChangedContext(ctx context.Context, v ItemVersion, item Item) error {
+	tx, err := d.db.BeginTx(ctx, nil)
 	if err != nil {
 		return err
 	}
@@ -454,12 +582,12 @@ func (d *DB) AddItemVersionAndUpdateItemChanged(v ItemVersion, item Item) error 
 			_ = tx.Rollback()
 		}
 	}()
-	if _, err := tx.Exec(`INSERT OR REPLACE INTO item_versions(id, item_id, version, content_path, content_hash, created_at, size_bytes) VALUES (?, ?, ?, ?, ?, ?, ?)`,
+	if _, err := tx.ExecContext(ctx, `INSERT OR REPLACE INTO item_versions(id, item_id, version, content_path, content_hash, created_at, size_bytes) VALUES (?, ?, ?, ?, ?, ?, ?)`,
 		v.ID, v.ItemID, v.Version, v.ContentPath, v.ContentHash, v.CreatedAt, v.SizeBytes); err != nil {
 		return err
 	}
-	if _, err := tx.Exec(`UPDATE items SET title=?, url=?, canonical_url=?, published_at=?, fetched_at=?, last_seen_at=?, content_path=?, content_hash=?, version=?, updated_at=?, tags_json=? WHERE id=?`,
-		item.Title, item.URL, item.CanonicalURL, item.PublishedAt, item.FetchedAt, item.LastSeenAt, item.ContentPath, item.ContentHash, item.Version, item.UpdatedAt, tagsJSON(item.Tags), item.ID); err != nil {
+	if _, err := tx.ExecContext(ctx, `UPDATE items SET title=?, url=?, canonical_url=?, published_at=?, last_seen_at=?, fetched_at=?, content_path=?, content_hash=?, version=?, updated_at=?, tags_json=? WHERE id=?`,
+		item.Title, item.URL, item.CanonicalURL, item.PublishedAt, item.LastSeenAt, item.FetchedAt, item.ContentPath, item.ContentHash, item.Version, item.UpdatedAt, tagsJSON(item.Tags), item.ID); err != nil {
 		return err
 	}
 	committed = true
@@ -620,6 +748,15 @@ func scanSource(s scanner) (Source, error) {
 	}
 	out.Enabled = enabled == 1
 	_ = json.Unmarshal([]byte(tags), &out.Tags)
+	if _, err := domain.ParseSourceType(out.Type); err != nil {
+		return out, err
+	}
+	if _, err := domain.ParseSourceLifecycle(out.Lifecycle); err != nil {
+		return out, err
+	}
+	if _, err := domain.ParseSyncStatus(out.LastSyncStatus); err != nil {
+		return out, err
+	}
 	return out, nil
 }
 
@@ -639,6 +776,9 @@ func scanItem(s scanner) (Item, error) {
 	}
 	out.Starred = starred == 1
 	_ = json.Unmarshal([]byte(tags), &out.Tags)
+	if _, err := domain.ParseSourceLifecycle(out.SourceLifecycle); err != nil {
+		return out, err
+	}
 	if metricProvider.Valid || metricFetchedAt.Valid || metricJSON.Valid {
 		var itemMetrics metrics.ItemMetrics
 		if metricJSON.Valid && metricJSON.String != "" {

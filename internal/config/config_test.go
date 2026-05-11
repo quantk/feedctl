@@ -102,6 +102,35 @@ func TestLoadRejectsUnsupportedSourceType(t *testing.T) {
 	}
 }
 
+func TestWriteSourceAtomicallyReplacesSymlink(t *testing.T) {
+	dir := t.TempDir()
+	realPath := filepath.Join(dir, "real.toml")
+	linkPath := filepath.Join(dir, "source.toml")
+	if err := os.WriteFile(realPath, []byte("sentinel"), 0o644); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.Symlink(realPath, linkPath); err != nil {
+		t.Skipf("symlink unavailable: %v", err)
+	}
+	if err := WriteSource(linkPath, Source{ID: "example", Type: SourceTypeRSS, Name: "Example", URL: "https://example.com/feed.xml", Enabled: true}); err != nil {
+		t.Fatal(err)
+	}
+	real, err := os.ReadFile(realPath)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if string(real) != "sentinel" {
+		t.Fatalf("WriteSource followed symlink and modified linked target: %q", string(real))
+	}
+	info, err := os.Lstat(linkPath)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if info.Mode()&os.ModeSymlink != 0 {
+		t.Fatalf("WriteSource left target as symlink; want atomic replacement")
+	}
+}
+
 func TestMarshalSourceUsesValidTOML(t *testing.T) {
 	b, err := MarshalSource(Source{ID: "habr", Type: "rss", Name: "Habr", URL: "https://example.com/feed.xml", Enabled: true, Interval: "10m", Tags: []string{"tech", "ru"}})
 	if err != nil {

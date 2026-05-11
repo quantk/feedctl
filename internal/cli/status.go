@@ -4,7 +4,6 @@ import (
 	"fmt"
 
 	"feedctl/internal/app"
-	"feedctl/internal/store"
 
 	"github.com/spf13/cobra"
 )
@@ -23,7 +22,7 @@ func newStatusCommand(opts *options) *cobra.Command {
 		if opts.JSON {
 			return writeSuccess(cmd.OutOrStdout(), "status", false, status)
 		}
-		_, _ = fmt.Fprintf(cmd.OutOrStdout(), "%d unread | src:%d | removed:%d | disk:%s | sync %s | %s\n", status.UnreadCount, status.SourceCount, status.RemovedSourceCount, store.HumanBytes(status.Storage.Total()), status.LatestSyncStatus, status.LatestSyncAt)
+		_, _ = fmt.Fprintf(cmd.OutOrStdout(), "%d unread | src:%d | removed:%d | disk:%s | sync %s | %s\n", status.UnreadCount, status.SourceCount, status.RemovedSourceCount, app.HumanBytes(status.Storage.Total()), status.LatestSyncStatus, status.LatestSyncAt)
 		return nil
 	}}
 }

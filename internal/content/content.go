@@ -13,6 +13,8 @@ import (
 	"strings"
 	"time"
 	"unicode"
+
+	"feedctl/internal/atomicfile"
 )
 
 type RenderItem struct {
@@ -161,35 +163,13 @@ func ResolveCollision(initialRel, itemID string, assigned func(string) (bool, er
 }
 
 func SafeWrite(root, rel, tmpDir string, data []byte) (string, int64, error) {
+	_ = tmpDir
 	rel = cleanRel(rel)
 	if rel == "." || strings.HasPrefix(rel, "../") || filepath.IsAbs(rel) {
 		return "", 0, fmt.Errorf("unsafe relative path %q", rel)
 	}
 	abs := filepath.Join(root, rel)
-	if err := os.MkdirAll(filepath.Dir(abs), 0o755); err != nil {
-		return "", 0, err
-	}
-	if err := os.MkdirAll(tmpDir, 0o755); err != nil {
-		return "", 0, err
-	}
-	tmp, err := os.CreateTemp(tmpDir, "feedctl-*.tmp")
-	if err != nil {
-		return "", 0, err
-	}
-	tmpName := tmp.Name()
-	defer os.Remove(tmpName)
-	if _, err := tmp.Write(data); err != nil {
-		_ = tmp.Close()
-		return "", 0, err
-	}
-	if err := tmp.Sync(); err != nil {
-		_ = tmp.Close()
-		return "", 0, err
-	}
-	if err := tmp.Close(); err != nil {
-		return "", 0, err
-	}
-	if err := os.Rename(tmpName, abs); err != nil {
+	if err := atomicfile.WriteFile(abs, data, 0o644); err != nil {
 		return "", 0, err
 	}
 	return abs, int64(len(data)), nil

@@ -4,6 +4,7 @@ import (
 	"database/sql"
 	"errors"
 	"path/filepath"
+	"strings"
 	"testing"
 
 	_ "modernc.org/sqlite"
@@ -16,7 +17,7 @@ func TestMigrateRecordsInitialMigrationForFreshDatabase(t *testing.T) {
 	}
 	defer db.Close()
 
-	assertAppliedMigrationVersions(t, db, []int{1})
+	assertAppliedMigrationVersions(t, db, []int{1, 2})
 }
 
 func TestMigrateIsIdempotentForAlreadyAppliedInitialMigration(t *testing.T) {
@@ -25,7 +26,7 @@ func TestMigrateIsIdempotentForAlreadyAppliedInitialMigration(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	assertAppliedMigrationVersions(t, db, []int{1})
+	assertAppliedMigrationVersions(t, db, []int{1, 2})
 	if err := db.Close(); err != nil {
 		t.Fatal(err)
 	}
@@ -35,7 +36,7 @@ func TestMigrateIsIdempotentForAlreadyAppliedInitialMigration(t *testing.T) {
 		t.Fatal(err)
 	}
 	defer db.Close()
-	assertAppliedMigrationVersions(t, db, []int{1})
+	assertAppliedMigrationVersions(t, db, []int{1, 2})
 }
 
 func TestApplyMigrationsFailureDoesNotRecordVersion(t *testing.T) {
@@ -51,6 +52,37 @@ func TestApplyMigrationsFailureDoesNotRecordVersion(t *testing.T) {
 		t.Fatalf("applyMigrations error=%v want boom", err)
 	}
 	assertAppliedMigrationVersions(t, db, nil)
+}
+
+func TestOpenRejectsFutureSchemaVersion(t *testing.T) {
+	path := filepath.Join(t.TempDir(), "feedctl.db")
+	sqlDB, err := sql.Open("sqlite", path)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if _, err := sqlDB.Exec(`CREATE TABLE schema_migrations (version INTEGER PRIMARY KEY, applied_at TEXT NOT NULL)`); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := sqlDB.Exec(`INSERT INTO schema_migrations(version, applied_at) VALUES (999, 'future')`); err != nil {
+		t.Fatal(err)
+	}
+	if err := sqlDB.Close(); err != nil {
+		t.Fatal(err)
+	}
+
+	db, err := Open(path)
+	if err == nil {
+		if db != nil {
+			_ = db.Close()
+		}
+		t.Fatal("Open unexpectedly accepted future schema version")
+	}
+	if db != nil {
+		t.Fatalf("Open returned DB for future schema: %#v", db)
+	}
+	if !strings.Contains(err.Error(), "future schema version") || !strings.Contains(err.Error(), "upgrade feedctl") {
+		t.Fatalf("future schema error=%v", err)
+	}
 }
 
 func TestOpenReturnsNilDBWhenMigrationFails(t *testing.T) {

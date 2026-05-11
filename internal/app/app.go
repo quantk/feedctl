@@ -39,8 +39,8 @@ func AppError(code, message string, err error) Error {
 }
 
 type App struct {
-	Loaded config.Loaded
-	Store  *store.DB
+	loaded config.Loaded
+	store  *store.DB
 }
 
 type AddRSSParams struct {
@@ -111,30 +111,42 @@ func Open(ctx context.Context) (*App, error) {
 	if err != nil {
 		return nil, err
 	}
-	a := &App{Loaded: loaded, Store: st}
-	if err := a.ReconcileSources(); err != nil {
-		_ = st.Close()
-		return nil, err
-	}
-	return a, nil
+	return &App{loaded: loaded, store: st}, nil
 }
 
 func (a *App) Close() error {
 	if a == nil {
 		return nil
 	}
-	return a.Store.Close()
+	return a.store.Close()
 }
 
-func (a *App) ReconcileSources() error {
-	ids := make(map[string]struct{}, len(a.Loaded.Sources))
-	for _, src := range a.Loaded.Sources {
-		ids[src.ID] = struct{}{}
-		if err := a.Store.UpsertConfiguredSource(src); err != nil {
-			return err
-		}
+func (a *App) Paths() config.Paths {
+	if a == nil {
+		return config.Paths{}
 	}
-	return a.Store.MarkRemovedExcept(ids)
+	return a.loaded.Paths
+}
+
+func (a *App) Config() config.Config {
+	if a == nil {
+		return config.Config{}
+	}
+	return a.loaded.Config
+}
+
+func (a *App) ConfiguredSources() []config.Source {
+	if a == nil {
+		return nil
+	}
+	return append([]config.Source(nil), a.loaded.Sources...)
+}
+
+func (a *App) ReconcileSources(ctx context.Context) error {
+	if a == nil || a.store == nil {
+		return nil
+	}
+	return a.store.ReconcileConfiguredSources(ctx, a.loaded.Sources)
 }
 
 func LoadOnly() (config.Loaded, error) {
@@ -245,14 +257,20 @@ func AddTelegram(ctx context.Context, rawChannel string, p AddTelegramParams) (A
 	return res, nil
 }
 
-func (a *App) Sources(includeRemoved bool) ([]store.Source, error) {
-	return a.Store.ListSources(includeRemoved)
+func (a *App) Sources(includeRemoved bool) ([]Source, error) {
+	if err := a.ReconcileSources(context.Background()); err != nil {
+		return nil, err
+	}
+	return a.store.ListSources(includeRemoved)
 }
 
-func (a *App) Source(id string) (store.Source, error) {
-	s, err := a.Store.GetSource(id)
+func (a *App) Source(id string) (Source, error) {
+	if err := a.ReconcileSources(context.Background()); err != nil {
+		return Source{}, err
+	}
+	s, err := a.store.GetSource(id)
 	if errors.Is(err, store.ErrNotFound) {
-		return store.Source{}, AppError("source-not-found", "source not found", err)
+		return Source{}, AppError("source-not-found", "source not found", err)
 	}
 	return s, err
 }
@@ -277,8 +295,14 @@ func (a *App) SetSourceEnabled(id string, enabled bool, dryRun bool) (config.Sou
 	if err := config.WriteSource(src.FilePath, src); err != nil {
 		return config.Source{}, err
 	}
-	a.Loaded, _ = config.Load()
-	_ = a.ReconcileSources()
+	loaded, err := config.Load()
+	if err != nil {
+		return config.Source{}, err
+	}
+	a.loaded = loaded
+	if err := a.ReconcileSources(context.Background()); err != nil {
+		return config.Source{}, err
+	}
 	return src, nil
 }
 
@@ -291,27 +315,42 @@ func (a *App) RemoveSource(id string, dryRun bool) (RemoveResult, error) {
 	if dryRun {
 		return res, nil
 	}
+	if err := a.ReconcileSources(context.Background()); err != nil {
+		return RemoveResult{}, err
+	}
 	if err := os.Remove(src.FilePath); err != nil {
 		return RemoveResult{}, err
 	}
-	a.Loaded, _ = config.Load()
-	_ = a.ReconcileSources()
+	loaded, err := config.Load()
+	if err != nil {
+		return RemoveResult{}, err
+	}
+	a.loaded = loaded
+	if err := a.ReconcileSources(context.Background()); err != nil {
+		return RemoveResult{}, err
+	}
 	return res, nil
 }
 
 func (a *App) Sync(ctx context.Context, sourceID string) feedSync.Result {
-	runner := feedSync.NewRunner(a.Store, a.Loaded.Paths, a.Loaded.Config)
-	return runner.RunAll(ctx, a.Loaded.Sources, feedSync.Options{SourceID: sourceID})
+	if err := a.ReconcileSources(ctx); err != nil {
+		return feedSync.Result{OK: false, Action: "sync", Errors: []string{err.Error()}}
+	}
+	runner := feedSync.NewRunner(a.store, a.loaded.Paths, a.loaded.Config)
+	return runner.RunAll(ctx, a.loaded.Sources, feedSync.Options{SourceID: sourceID})
 }
 
-func (a *App) Items(filter store.ItemFilter) ([]store.Item, error) {
-	return a.Store.ListItems(filter)
+func (a *App) Items(filter ItemFilter) ([]Item, error) {
+	if err := a.ReconcileSources(context.Background()); err != nil {
+		return nil, err
+	}
+	return a.store.ListItems(filter)
 }
 
-func (a *App) Item(id string) (store.Item, error) {
-	item, err := a.Store.GetItem(id)
+func (a *App) Item(id string) (Item, error) {
+	item, err := a.store.GetItem(id)
 	if errors.Is(err, store.ErrNotFound) {
-		return store.Item{}, AppError("item-not-found", "item not found", err)
+		return Item{}, AppError("item-not-found", "item not found", err)
 	}
 	return item, err
 }
@@ -321,7 +360,7 @@ func (a *App) MarkdownPath(id string) (string, error) {
 	if err != nil {
 		return "", err
 	}
-	return filepath.Join(a.Loaded.Paths.ContentDir, item.ContentPath), nil
+	return filepath.Join(a.loaded.Paths.ContentDir, item.ContentPath), nil
 }
 
 func (a *App) OpenItem(ctx context.Context, id string) error {
@@ -338,7 +377,7 @@ func (a *App) OpenItem(ctx context.Context, id string) error {
 	if item.URL == "" {
 		return AppError("item-url-missing", "item has no URL", nil)
 	}
-	cmd := exec.CommandContext(ctx, a.Loaded.Config.TUI.Browser, item.URL)
+	cmd := exec.CommandContext(ctx, a.loaded.Config.TUI.Browser, item.URL)
 	return cmd.Start()
 }
 
@@ -353,12 +392,12 @@ func (a *App) OpenMarkdown(ctx context.Context, id string) error {
 	if err != nil {
 		return err
 	}
-	cmd := exec.CommandContext(ctx, a.Loaded.Config.TUI.Editor, path)
+	cmd := exec.CommandContext(ctx, a.loaded.Config.TUI.Editor, path)
 	return cmd.Start()
 }
 
 func (a *App) SetRead(id string, read bool) error {
-	return a.Store.SetRead(id, read)
+	return a.store.SetRead(id, read)
 }
 
 func (a *App) ToggleRead(id string) error {
@@ -366,11 +405,11 @@ func (a *App) ToggleRead(id string) error {
 	if err != nil {
 		return err
 	}
-	return a.Store.SetRead(id, item.ReadAt == "")
+	return a.store.SetRead(id, item.ReadAt == "")
 }
 
 func (a *App) SetStarred(id string, starred bool) error {
-	return a.Store.SetStarred(id, starred)
+	return a.store.SetStarred(id, starred)
 }
 
 func (a *App) ToggleStarred(id string) error {
@@ -378,19 +417,19 @@ func (a *App) ToggleStarred(id string) error {
 	if err != nil {
 		return err
 	}
-	return a.Store.SetStarred(id, !item.Starred)
+	return a.store.SetStarred(id, !item.Starred)
 }
 
 func (a *App) Archive(id string) error {
-	return a.Store.SetArchived(id, true)
+	return a.store.SetArchived(id, true)
 }
 
-func (a *App) Storage() (store.StorageStats, error) {
-	return a.Store.GetStorageStats(a.Loaded.Paths.Database)
+func (a *App) Storage() (StorageStats, error) {
+	return a.store.GetStorageStats(a.loaded.Paths.Database)
 }
 
 func (a *App) ReconcileStorage() (StorageReconcileResult, error) {
-	items, err := a.Items(store.ItemFilter{AllItems: true})
+	items, err := a.Items(ItemFilter{AllItems: true})
 	if err != nil {
 		return StorageReconcileResult{}, err
 	}
@@ -398,18 +437,18 @@ func (a *App) ReconcileStorage() (StorageReconcileResult, error) {
 	var missing []string
 	for _, item := range items {
 		expected[item.ContentPath] = struct{}{}
-		if _, err := os.Stat(filepath.Join(a.Loaded.Paths.ContentDir, item.ContentPath)); err != nil && errors.Is(err, os.ErrNotExist) {
+		if _, err := os.Stat(filepath.Join(a.loaded.Paths.ContentDir, item.ContentPath)); err != nil && errors.Is(err, os.ErrNotExist) {
 			missing = append(missing, item.ContentPath)
 		}
 	}
 	var scanned int
 	var orphaned []string
-	_ = filepath.WalkDir(a.Loaded.Paths.ContentDir, func(path string, d os.DirEntry, err error) error {
+	_ = filepath.WalkDir(a.loaded.Paths.ContentDir, func(path string, d os.DirEntry, err error) error {
 		if err != nil || d.IsDir() {
 			return nil
 		}
 		scanned++
-		rel, err := filepath.Rel(a.Loaded.Paths.ContentDir, path)
+		rel, err := filepath.Rel(a.loaded.Paths.ContentDir, path)
 		if err != nil {
 			return nil
 		}
@@ -419,19 +458,22 @@ func (a *App) ReconcileStorage() (StorageReconcileResult, error) {
 		}
 		return nil
 	})
-	if err := feedSync.ReconcileStorage(a.Store, a.Loaded.Paths); err != nil {
+	if err := feedSync.ReconcileStorage(a.store, a.loaded.Paths); err != nil {
 		return StorageReconcileResult{}, err
 	}
 	stats, err := a.Storage()
 	return StorageReconcileResult{Storage: stats, ScannedFiles: scanned, MissingFiles: missing, OrphanedFiles: orphaned}, err
 }
 
-func (a *App) Status() (store.StatusSummary, error) {
-	return a.Store.Status(a.Loaded.Paths.Database)
+func (a *App) Status() (StatusSummary, error) {
+	if err := a.ReconcileSources(context.Background()); err != nil {
+		return StatusSummary{}, err
+	}
+	return a.store.Status(a.loaded.Paths.Database)
 }
 
 func (a *App) configSource(id string) (config.Source, error) {
-	for _, src := range a.Loaded.Sources {
+	for _, src := range a.loaded.Sources {
 		if src.ID == id {
 			return src, nil
 		}

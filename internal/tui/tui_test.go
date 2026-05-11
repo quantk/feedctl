@@ -136,16 +136,21 @@ func TestTUIReloadFailureIsVisibleAndKeepsPreviousState(t *testing.T) {
 }
 
 func TestTUIItemActionFailureIsVisible(t *testing.T) {
-	testutil.IsolatedEnv(t)
+	configDir, _ := testutil.IsolatedEnv(t)
+	if err := config.WriteSource(filepath.Join(configDir, "sources.d", "example.toml"), config.Source{ID: "example", Type: config.SourceTypeRSS, Name: "Example", URL: "https://example.com/feed.xml", Enabled: true}); err != nil {
+		t.Fatal(err)
+	}
 	a, err := app.Open(context.Background())
 	if err != nil {
 		t.Fatal(err)
 	}
 	defer a.Close()
-	if err := a.Store.UpsertConfiguredSource(config.Source{ID: "example", Type: config.SourceTypeRSS, Name: "Example", URL: "https://example.com/feed.xml", Enabled: true}); err != nil {
+	if err := a.ReconcileSources(context.Background()); err != nil {
 		t.Fatal(err)
 	}
-	if err := a.Store.CreateItem(store.Item{ID: "no-url", SourceID: "example", SourceItemID: "guid-1", IdentityKind: "guid", Title: "No URL", ContentPath: "example/no-url.md", ContentHash: "sha256:no-url", Version: 1}); err != nil {
+	db := openTUIStore(t, a)
+	defer db.Close()
+	if err := db.CreateItem(store.Item{ID: "no-url", SourceID: "example", SourceItemID: "guid-1", IdentityKind: "guid", Title: "No URL", ContentPath: "example/no-url.md", ContentHash: "sha256:no-url", Version: 1}); err != nil {
 		t.Fatal(err)
 	}
 
@@ -418,7 +423,7 @@ func TestTUISearchDoesNotFilterItems(t *testing.T) {
 }
 
 func TestFilterItemsMatchesUnicodeCaseInsensitive(t *testing.T) {
-	items := []store.Item{
+	items := []app.Item{
 		{Title: "Привет мир", SourceID: "ru"},
 		{Title: "Other", SourceID: "en"},
 	}
@@ -434,17 +439,17 @@ func TestTUIItemRowRendersMetrics(t *testing.T) {
 	zero := 0
 	m := Model{}
 
-	row := m.renderItemRow(store.Item{Title: "Metric title", SourceID: "habr-ai", Metrics: &metrics.ItemMetrics{Score: &score, CommentsCount: &comments}}, false, 80)
+	row := m.renderItemRow(app.Item{Title: "Metric title", SourceID: "habr-ai", Metrics: &metrics.ItemMetrics{Score: &score, CommentsCount: &comments}}, false, 80)
 	if !strings.Contains(row, "+12") || !strings.Contains(row, "4c") {
 		t.Fatalf("row missing compact metrics: %q", row)
 	}
 
-	row = m.renderItemRow(store.Item{Title: "Plain title", SourceID: "src"}, false, 80)
+	row = m.renderItemRow(app.Item{Title: "Plain title", SourceID: "src"}, false, 80)
 	if strings.Contains(row, "+0") || strings.Contains(row, "0c") {
 		t.Fatalf("row contains placeholder metrics: %q", row)
 	}
 
-	row = m.renderItemRow(store.Item{Title: "Zero title", SourceID: "src", Metrics: &metrics.ItemMetrics{Score: &zero}}, false, 80)
+	row = m.renderItemRow(app.Item{Title: "Zero title", SourceID: "src", Metrics: &metrics.ItemMetrics{Score: &zero}}, false, 80)
 	if !strings.Contains(row, "0") {
 		t.Fatalf("row missing known zero score: %q", row)
 	}
@@ -467,7 +472,7 @@ func TestTUIPreviewRendersExpandedMetrics(t *testing.T) {
 	if !res.OK {
 		t.Fatalf("sync: %#v", res)
 	}
-	items, err := a.Items(store.ItemFilter{})
+	items, err := a.Items(app.ItemFilter{})
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -475,7 +480,9 @@ func TestTUIPreviewRendersExpandedMetrics(t *testing.T) {
 	comments := 4
 	votes := 5
 	reads := 23
-	if err := a.Store.UpsertItemMetrics(items[0].ID, metrics.ItemMetrics{Provider: "habr", Score: &score, CommentsCount: &comments, VotesCount: &votes, ReadingCount: &reads, FetchedAt: "2026-05-11T15:00:00Z"}); err != nil {
+	db := openTUIStore(t, a)
+	defer db.Close()
+	if err := db.UpsertItemMetrics(items[0].ID, metrics.ItemMetrics{Provider: "habr", Score: &score, CommentsCount: &comments, VotesCount: &votes, ReadingCount: &reads, FetchedAt: "2026-05-11T15:00:00Z"}); err != nil {
 		t.Fatal(err)
 	}
 
@@ -565,21 +572,26 @@ func TestTUIWindowSizeAndFullHeightRender(t *testing.T) {
 }
 
 func TestTUIScrollKeepsFrameWhenItemTitleContainsLineBreak(t *testing.T) {
-	testutil.IsolatedEnv(t)
+	configDir, _ := testutil.IsolatedEnv(t)
+	if err := config.WriteSource(filepath.Join(configDir, "sources.d", "example.toml"), config.Source{ID: "example", Type: config.SourceTypeRSS, Name: "Example", URL: "https://example.com/feed.xml", Enabled: true}); err != nil {
+		t.Fatal(err)
+	}
 	a, err := app.Open(context.Background())
 	if err != nil {
 		t.Fatal(err)
 	}
 	defer a.Close()
-	if err := a.Store.UpsertConfiguredSource(config.Source{ID: "example", Type: config.SourceTypeRSS, Name: "Example", URL: "https://example.com/feed.xml", Enabled: true}); err != nil {
+	if err := a.ReconcileSources(context.Background()); err != nil {
 		t.Fatal(err)
 	}
+	db := openTUIStore(t, a)
+	defer db.Close()
 	for i := range 12 {
 		title := "Item title"
 		if i == 8 {
 			title = "Item with\nline break"
 		}
-		if err := a.Store.CreateItem(store.Item{ID: fmt.Sprintf("item-%02d", i), SourceID: "example", SourceItemID: fmt.Sprintf("guid-%02d", i), IdentityKind: "guid", Title: title, URL: fmt.Sprintf("https://example.com/%02d", i), ContentPath: fmt.Sprintf("example/%02d.md", i), ContentHash: fmt.Sprintf("sha256:%02d", i), Version: 1, PublishedAt: fmt.Sprintf("2026-05-11T00:%02d:00Z", i)}); err != nil {
+		if err := db.CreateItem(store.Item{ID: fmt.Sprintf("item-%02d", i), SourceID: "example", SourceItemID: fmt.Sprintf("guid-%02d", i), IdentityKind: "guid", Title: title, URL: fmt.Sprintf("https://example.com/%02d", i), ContentPath: fmt.Sprintf("example/%02d.md", i), ContentHash: fmt.Sprintf("sha256:%02d", i), Version: 1, PublishedAt: fmt.Sprintf("2026-05-11T00:%02d:00Z", i)}); err != nil {
 			t.Fatal(err)
 		}
 	}
@@ -686,6 +698,15 @@ func updateKey(t *testing.T, m Model, key string) Model {
 	}
 	model, _ := m.Update(msg)
 	return model.(Model)
+}
+
+func openTUIStore(t *testing.T, a *app.App) *store.DB {
+	t.Helper()
+	db, err := store.Open(a.Paths().Database)
+	if err != nil {
+		t.Fatal(err)
+	}
+	return db
 }
 
 func newFailingSyncModel(t *testing.T) (Model, func()) {

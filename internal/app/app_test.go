@@ -115,6 +115,92 @@ func TestAddRSSSyncMarkdownStateStorageAndVersions(t *testing.T) {
 	}
 }
 
+func TestAppOpenDoesNotImplicitlyReconcileSources(t *testing.T) {
+	configDir, dataRoot := testutil.IsolatedEnv(t)
+	if err := config.WriteSource(filepath.Join(configDir, "sources.d", "example.toml"), config.Source{ID: "example", Type: config.SourceTypeRSS, Name: "Example", URL: "https://example.com/feed.xml", Enabled: true, Interval: "5m"}); err != nil {
+		t.Fatal(err)
+	}
+	a, err := app.Open(context.Background())
+	if err != nil {
+		t.Fatal(err)
+	}
+	if err := a.Close(); err != nil {
+		t.Fatal(err)
+	}
+
+	db, err := store.Open(filepath.Join(dataRoot, "feedctl.db"))
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer db.Close()
+	sources, err := db.ListSources(true)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(sources) != 0 {
+		t.Fatalf("app.Open reconciled sources implicitly: %#v", sources)
+	}
+}
+
+func TestExplicitReconcileSourcesSurfacesErrors(t *testing.T) {
+	configDir, _ := testutil.IsolatedEnv(t)
+	if err := config.WriteSource(filepath.Join(configDir, "sources.d", "example.toml"), config.Source{ID: "example", Type: config.SourceTypeRSS, Name: "Example", URL: "https://example.com/feed.xml", Enabled: true, Interval: "5m"}); err != nil {
+		t.Fatal(err)
+	}
+	a, err := app.Open(context.Background())
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer a.Close()
+	db := openAppStore(t, a)
+	defer db.Close()
+	if _, err := db.Raw().Exec(`CREATE TRIGGER fail_reconcile BEFORE INSERT ON runtime_sources BEGIN SELECT RAISE(FAIL, 'fail reconcile'); END`); err != nil {
+		t.Fatal(err)
+	}
+	if err := a.ReconcileSources(context.Background()); err == nil || !strings.Contains(err.Error(), "fail reconcile") {
+		t.Fatalf("ReconcileSources error=%v want trigger failure", err)
+	}
+	sources, err := db.ListSources(true)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(sources) != 0 {
+		t.Fatalf("failed reconciliation committed sources: %#v", sources)
+	}
+}
+
+func TestReconcileSourcesRollsBackPartialLifecycleUpdates(t *testing.T) {
+	configDir, _ := testutil.IsolatedEnv(t)
+	for _, src := range []config.Source{
+		{ID: "first", Type: config.SourceTypeRSS, Name: "First", URL: "https://example.com/first.xml", Enabled: true, Interval: "5m"},
+		{ID: "second", Type: config.SourceTypeRSS, Name: "Second", URL: "https://example.com/second.xml", Enabled: true, Interval: "5m"},
+	} {
+		if err := config.WriteSource(filepath.Join(configDir, "sources.d", src.ID+".toml"), src); err != nil {
+			t.Fatal(err)
+		}
+	}
+	a, err := app.Open(context.Background())
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer a.Close()
+	db := openAppStore(t, a)
+	defer db.Close()
+	if _, err := db.Raw().Exec(`CREATE TRIGGER fail_second_reconcile BEFORE INSERT ON runtime_sources WHEN NEW.id='second' BEGIN SELECT RAISE(FAIL, 'fail second reconcile'); END`); err != nil {
+		t.Fatal(err)
+	}
+	if err := a.ReconcileSources(context.Background()); err == nil || !strings.Contains(err.Error(), "fail second reconcile") {
+		t.Fatalf("ReconcileSources error=%v want second-source failure", err)
+	}
+	sources, err := db.ListSources(true)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(sources) != 0 {
+		t.Fatalf("partial reconciliation was committed: %#v", sources)
+	}
+}
+
 func TestSourceLifecycleRemoveAndReappear(t *testing.T) {
 	configDir, _ := testutil.IsolatedEnv(t)
 	feed := testutil.RSSFeed("Example", testutil.DefaultItem("guid-1", "First", "Body"))
@@ -288,7 +374,7 @@ func TestAppSourceItemStatusAndStorageOperations(t *testing.T) {
 	if err := os.Remove(mdPath); err != nil {
 		t.Fatal(err)
 	}
-	orphanPath := filepath.Join(a.Loaded.Paths.ContentDir, "orphan.md")
+	orphanPath := filepath.Join(a.Paths().ContentDir, "orphan.md")
 	if err := os.WriteFile(orphanPath, []byte("orphan"), 0o644); err != nil {
 		t.Fatal(err)
 	}
@@ -300,7 +386,9 @@ func TestAppSourceItemStatusAndStorageOperations(t *testing.T) {
 		t.Fatalf("reconciled=%#v", reconciled)
 	}
 
-	if err := a.Store.CreateItem(store.Item{ID: "no-url", SourceID: "example", SourceItemID: "no-url", IdentityKind: "guid", Title: "No URL", ContentPath: "example/no-url.md", ContentHash: "sha256:no-url", Version: 1}); err != nil {
+	db := openAppStore(t, a)
+	defer db.Close()
+	if err := db.CreateItem(store.Item{ID: "no-url", SourceID: "example", SourceItemID: "no-url", IdentityKind: "guid", Title: "No URL", ContentPath: "example/no-url.md", ContentHash: "sha256:no-url", Version: 1}); err != nil {
 		t.Fatal(err)
 	}
 	if err := a.OpenItem(context.Background(), "no-url"); err == nil || !strings.Contains(err.Error(), "item has no URL") {
@@ -357,6 +445,15 @@ func TestAppErrorFormatting(t *testing.T) {
 	if got := codeOnly.Error(); got != "code" {
 		t.Fatalf("Error code only=%q", got)
 	}
+}
+
+func openAppStore(t *testing.T, a *app.App) *store.DB {
+	t.Helper()
+	db, err := store.Open(a.Paths().Database)
+	if err != nil {
+		t.Fatal(err)
+	}
+	return db
 }
 
 func containsAll(value string, needles []string) bool {
