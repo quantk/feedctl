@@ -72,7 +72,7 @@ Navigation: `j/k`, arrows, `h/l`, `g/G`, `Ctrl+d/u`, `Ctrl+f/b`.
 
 Sections: `1` Inbox, `2` Unread, `3` Starred, `4` Sources, `5` Removed Sources, `6` All Items, `Tab`, `Shift+Tab`.
 
-Search/filter: `/`, `n/N`, `f`, `F`, `A`.
+Search/filter: `/` search with `n/N` next/previous, `f` live-filter items, `F` clear filter, `A` toggle removed-source items.
 
 Item actions: `Enter/l` open, `Space` read/unread, `u` unread, `s` star, `a` archive from inbox, `o` open URL, `e` edit Markdown.
 

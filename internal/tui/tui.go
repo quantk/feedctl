@@ -82,7 +82,9 @@ type Model struct {
 	reader       bool
 	help         bool
 	searchMode   bool
+	filterMode   bool
 	search       string
+	filter       string
 	message      string
 	showRemoved  bool
 	syncing      bool
@@ -150,12 +152,25 @@ func (m Model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 				m.searchMode = false
 				m.findNext(1)
 			case "backspace":
-				if len(m.search) > 0 {
-					m.search = m.search[:len(m.search)-1]
-				}
+				m.search = trimLastRune(m.search)
 			default:
-				if len(key) == 1 {
-					m.search += key
+				if msg.Type == tea.KeyRunes && len(msg.Runes) > 0 {
+					m.search += string(msg.Runes)
+				}
+			}
+			return m, nil
+		}
+		if m.filterMode {
+			switch key {
+			case "esc", "enter":
+				m.filterMode = false
+			case "backspace":
+				m.filter = trimLastRune(m.filter)
+				m.reload()
+			default:
+				if msg.Type == tea.KeyRunes && len(msg.Runes) > 0 {
+					m.filter += string(msg.Runes)
+					m.reload()
 				}
 			}
 			return m, nil
@@ -236,17 +251,21 @@ func (m Model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 			m.reload()
 		case "/":
 			m.searchMode = true
+			m.filterMode = false
 			m.search = ""
 		case "n":
 			m.findNext(1)
 		case "N":
 			m.findNext(-1)
 		case "f":
-			m.searchMode = true
-			m.search = ""
+			m.searchMode = false
+			m.filterMode = true
+			m.filter = ""
+			m.reload()
 			m.message = "filter"
 		case "F":
-			m.search = ""
+			m.filter = ""
+			m.filterMode = false
 			m.reload()
 		case "A":
 			m.showRemoved = !m.showRemoved
@@ -322,6 +341,10 @@ func (m Model) renderTabs(width int) string {
 	line := " " + strings.Join(parts, "  ")
 	if m.searchMode {
 		line += "  /" + m.search
+	} else if m.filterMode {
+		line += "  filter:" + m.filter
+	} else if m.filter != "" {
+		line += "  filtered:" + m.filter
 	}
 	return renderPlainLine(line, width, tabsStyle)
 }
@@ -362,6 +385,10 @@ func (m Model) renderList(width, height int) string {
 	lines := make([]string, 0, height)
 	if m.searchMode {
 		lines = append(lines, renderPlainLine(" /"+m.search, width, accentStyle))
+	} else if m.filterMode {
+		lines = append(lines, renderPlainLine(" filter:"+m.filter, width, accentStyle))
+	} else if m.filter != "" {
+		lines = append(lines, renderPlainLine(" filtered:"+m.filter, width, mutedStyle))
 	}
 	rowsAvailable := height - len(lines)
 	if rowsAvailable < 0 {
@@ -555,7 +582,7 @@ func (m Model) renderHelp(width, height int) string {
 		renderPlainLine("   1 Inbox, 2 Unread, 3 Starred, 4 Sources, 5 Removed Sources, 6 All Items", width, bodyStyle),
 		renderPlainLine("   Tab/Shift+Tab", width, bodyStyle),
 		renderPlainLine(" Search/filter", width, accentStyle),
-		renderPlainLine("   / search, n/N next/prev, f filter hint, F clear, A toggle removed-source items", width, bodyStyle),
+		renderPlainLine("   / search, n/N next/prev, f live filter, F clear, A toggle removed-source items", width, bodyStyle),
 		renderPlainLine(" Items", width, accentStyle),
 		renderPlainLine("   Enter/l open, Space read/unread, u unread, s star, a archive", width, bodyStyle),
 		renderPlainLine("   o open URL, e edit Markdown", width, bodyStyle),
@@ -712,8 +739,8 @@ func (m *Model) reload() {
 			filter.AllItems = true
 		}
 		items, _ := m.app.Items(filter)
-		if m.search != "" {
-			items = filterItems(items, m.search)
+		if m.filter != "" {
+			items = filterItems(items, m.filter)
 		}
 		m.items = items
 	}
@@ -796,6 +823,14 @@ func filterItems(items []store.Item, q string) []store.Item {
 		}
 	}
 	return out
+}
+
+func trimLastRune(s string) string {
+	if s == "" {
+		return ""
+	}
+	runes := []rune(s)
+	return string(runes[:len(runes)-1])
 }
 
 func (m Model) preview() string {

@@ -6,6 +6,7 @@ import (
 	"testing"
 
 	"feedctl/internal/app"
+	"feedctl/internal/store"
 	"feedctl/internal/testutil"
 
 	tea "github.com/charmbracelet/bubbletea"
@@ -126,6 +127,99 @@ func TestTUIEnterMarksItemRead(t *testing.T) {
 	}
 }
 
+func TestTUISearchAcceptsUnicodeRunes(t *testing.T) {
+	m := NewModel(nil)
+	m = updateKey(t, m, "/")
+	m = updateKey(t, m, "п")
+	m = updateKey(t, m, "р")
+	m = updateKey(t, m, "и")
+	if m.search != "при" {
+		t.Fatalf("search=%q want %q", m.search, "при")
+	}
+	m = updateKey(t, m, "backspace")
+	if m.search != "пр" {
+		t.Fatalf("search after backspace=%q want %q", m.search, "пр")
+	}
+}
+
+func TestTUILiveFilterNarrowsItems(t *testing.T) {
+	testutil.IsolatedEnv(t)
+	feed := testutil.RSSFeed("Example", testutil.DefaultItem("guid-1", "Привет мир", "Body"), testutil.DefaultItem("guid-2", "Other", "Body"))
+	server := testutil.FeedServer(t, &feed)
+	defer server.Close()
+	if _, err := app.AddRSS(context.Background(), server.URL, app.AddRSSParams{ID: "example", Name: "Example"}); err != nil {
+		t.Fatal(err)
+	}
+	a, err := app.Open(context.Background())
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer a.Close()
+	res := a.Sync(context.Background(), "")
+	if !res.OK {
+		t.Fatalf("sync: %#v", res)
+	}
+
+	m := NewModel(a)
+	if len(m.items) != 2 {
+		t.Fatalf("items=%d", len(m.items))
+	}
+	m = updateKey(t, m, "f")
+	m = updateKey(t, m, "п")
+	m = updateKey(t, m, "р")
+	if m.filter != "пр" {
+		t.Fatalf("filter=%q want %q", m.filter, "пр")
+	}
+	if len(m.items) != 1 || m.items[0].Title != "Привет мир" {
+		t.Fatalf("filtered items=%#v", m.items)
+	}
+	m = updateKey(t, m, "enter")
+	m = updateKey(t, m, "F")
+	if m.filter != "" || len(m.items) != 2 {
+		t.Fatalf("clear filter failed: filter=%q items=%d", m.filter, len(m.items))
+	}
+}
+
+func TestTUISearchDoesNotFilterItems(t *testing.T) {
+	testutil.IsolatedEnv(t)
+	feed := testutil.RSSFeed("Example", testutil.DefaultItem("guid-1", "Привет мир", "Body"), testutil.DefaultItem("guid-2", "Other", "Body"))
+	server := testutil.FeedServer(t, &feed)
+	defer server.Close()
+	if _, err := app.AddRSS(context.Background(), server.URL, app.AddRSSParams{ID: "example", Name: "Example"}); err != nil {
+		t.Fatal(err)
+	}
+	a, err := app.Open(context.Background())
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer a.Close()
+	res := a.Sync(context.Background(), "")
+	if !res.OK {
+		t.Fatalf("sync: %#v", res)
+	}
+
+	m := NewModel(a)
+	m = updateKey(t, m, "/")
+	m = updateKey(t, m, "п")
+	if m.search != "п" {
+		t.Fatalf("search=%q want %q", m.search, "п")
+	}
+	if len(m.items) != 2 {
+		t.Fatalf("search filtered items unexpectedly: %d", len(m.items))
+	}
+}
+
+func TestFilterItemsMatchesUnicodeCaseInsensitive(t *testing.T) {
+	items := []store.Item{
+		{Title: "Привет мир", SourceID: "ru"},
+		{Title: "Other", SourceID: "en"},
+	}
+	filtered := filterItems(items, "при")
+	if len(filtered) != 1 || filtered[0].Title != "Привет мир" {
+		t.Fatalf("filtered=%#v", filtered)
+	}
+}
+
 func TestTUIWindowSizeAndFullHeightRender(t *testing.T) {
 	m := NewModel(nil)
 	m = updateWindowSize(t, m, 72, 16)
@@ -197,6 +291,9 @@ func updateKey(t *testing.T, m Model, key string) Model {
 	}
 	if key == "enter" {
 		msg = tea.KeyMsg{Type: tea.KeyEnter}
+	}
+	if key == "backspace" {
+		msg = tea.KeyMsg{Type: tea.KeyBackspace}
 	}
 	model, _ := m.Update(msg)
 	return model.(Model)
